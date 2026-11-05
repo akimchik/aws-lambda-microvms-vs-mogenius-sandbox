@@ -78,10 +78,10 @@ mongodb:
     enabled: false
   resources:
     requests:
-      cpu: 50m
+      cpu: 100m
       memory: 128Mi
     limits:
-      cpu: 250m
+      cpu: 1000m
       memory: 384Mi
 
 testkube-dashboard:
