@@ -350,8 +350,14 @@ echo -e "\n${YELLOW}[8/8] Reconciling Testkube OSS & Benchmark/Security TestWork
 
 # Check for Testkube CLI on local host machine
 if ! command -v testkube >/dev/null 2>&1; then
-    echo -e "  ${CYAN}[>]${NC} Testkube CLI not found on host. Installing via Homebrew..."
-    brew install kubeshop/testkube/testkube || brew install testkube
+    echo -e "  ${CYAN}[>]${NC} Testkube CLI not found on host. Installing..."
+    if command -v brew >/dev/null 2>&1; then
+        echo -e "  ${CYAN}[>]${NC} Installing via Homebrew..."
+        brew install kubeshop/testkube/testkube || brew install testkube
+    else
+        echo -e "  ${CYAN}[>]${NC} Homebrew not detected (Linux/WSL2). Installing via official Testkube installer..."
+        curl -sSLf https://get.testkube.io | bash
+    fi
 fi
 
 # Reconcile Testkube Helm release on worker node
