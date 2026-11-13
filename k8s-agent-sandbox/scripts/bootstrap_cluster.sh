@@ -140,14 +140,18 @@ echo -e "\n${YELLOW}[3/8] Reconciling containerd & native gVisor (runsc) runtime
 echo -e "  ${CYAN}[>]${NC} Checking native Google gVisor (runsc) binary and containerd runtime on primary node..."
 minikube ssh "
 set -e
-# Install official Google runsc binary if missing or corrupted
+# Clean up stale/broken OBS kubic repositories baked into minikube kicbase images
+sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
+
+# Install official Google runsc binary if missing or corrupted via direct static binaries
 if ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
-    echo '  -> Downloading and installing official Google gVisor (runsc) package...'
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq apt-transport-https ca-certificates curl gnupg
-    curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg --yes
-    echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
-    sudo apt-get update -qq && sudo apt-get install --reinstall -y -qq runsc
+    echo '  -> Downloading official Google gVisor (runsc) static binaries from Google Cloud Storage...'
+    ARCH=\$(uname -m)
+    URL=\"https://storage.googleapis.com/gvisor/releases/release/latest/\${ARCH}\"
+    curl -fsSL \"\${URL}/runsc\" -o /tmp/runsc
+    curl -fsSL \"\${URL}/containerd-shim-runsc-v1\" -o /tmp/containerd-shim-runsc-v1
+    chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
+    sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
 fi
 
 # Ensure containerd config.toml has exactly one runsc runtime stanza

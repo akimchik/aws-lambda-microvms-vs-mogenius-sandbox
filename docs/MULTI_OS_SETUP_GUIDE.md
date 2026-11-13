@@ -16,7 +16,7 @@ This guide provides end-to-end instructions for provisioning and running the **2
 ### Multi-Architecture Notes (`aarch64` vs `x86_64`)
 * **We initially built and validated this platform on `aarch64`** (Apple Silicon M-series).
 * **100% Multi-Arch Image Support:** All container images in the stack (`ghcr.io/mogenius/agent-sandbox-chart/sandbox-default:1.2.1`, `bitnami/mongodb`, `grafana/grafana`, `ingress-nginx/controller`, `prometheus/prometheus`, `kubeshop/testkube-api-server`, `grafana/k6`) provide native multi-architecture manifests supporting both `linux/amd64` and `linux/arm64`.
-* **Dynamic gVisor Package Resolution:** In `k8s-agent-sandbox/scripts/bootstrap_cluster.sh`, the Google gVisor APT repository detects the node's architecture dynamically via `dpkg --print-architecture` inside the Minikube Debian `kicbase` container. It pulls the matching ARM64 or AMD64 `runsc` package automatically.
+* **Self-Contained gVisor Binary Installation:** In `k8s-agent-sandbox/scripts/bootstrap_cluster.sh`, the script downloads official static Google gVisor binaries (`runsc` and `containerd-shim-runsc-v1`) matching the detected CPU architecture (`x86_64` or `aarch64`) directly from Google Cloud Storage (`storage.googleapis.com/gvisor/releases/release/latest/${ARCH}`). This avoids reliance on APT package managers, third-party OpenSUSE/Kubic repositories, or expired GPG keys inside the Minikube node.
 
 ---
 
