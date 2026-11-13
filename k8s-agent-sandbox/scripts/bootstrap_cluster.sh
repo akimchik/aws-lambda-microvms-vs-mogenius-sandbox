@@ -143,13 +143,13 @@ set -e
 # Clean up stale/broken OBS kubic repositories baked into minikube kicbase images
 sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
 
-# Install official Google runsc binary if missing or corrupted via direct static binaries
-if ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
+# Install official Google runsc binary if missing, corrupted, or non-functional
+if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
     echo '  -> Downloading official Google gVisor (runsc) static binaries from Google Cloud Storage...'
     ARCH=\$(uname -m)
     URL=\"https://storage.googleapis.com/gvisor/releases/release/latest/\${ARCH}\"
-    curl -fsSL \"\${URL}/runsc\" -o /tmp/runsc
-    curl -fsSL \"\${URL}/containerd-shim-runsc-v1\" -o /tmp/containerd-shim-runsc-v1
+    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/runsc\" -o /tmp/runsc
+    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/containerd-shim-runsc-v1\" -o /tmp/containerd-shim-runsc-v1
     chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
     sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
 fi
