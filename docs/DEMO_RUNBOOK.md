@@ -3,8 +3,9 @@
 This runbook contains step-by-step instructions to run a live demo comparing **AWS Lambda MicroVMs** and **Kubernetes Agent Sandbox (mogenius)** on your local Minikube cluster.
 
 > [!IMPORTANT]
-> **Docker Desktop Prerequisites (Do Not Use Defaults):**
-> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker Desktop settings. My bootstrap script creates `minikube` with an 8,192 MB limit and adds `minikube-m02` with Minikube's default (~4 GB limit). The converged, idle stack uses ~5 GiB and ran for me in an 8.8 GB Docker VM, so 10–12 GB is headroom for cold image pulls and sustained load; on Docker's default 4 GB, expect `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
+> **Host OS & Architecture Prerequisites (macOS, Linux & Windows WSL 2):**
+> - **Cross-Platform Guide:** For comprehensive setup on **Linux (Ubuntu/Debian/RHEL)**, **Windows (WSL 2)**, or **macOS**, along with **`aarch64` (Apple Silicon)** vs. **`x86_64` (AMD64/Intel)** architecture specifics, refer to the [Multi-OS & Multi-Architecture Setup Guide](MULTI_OS_SETUP_GUIDE.md).
+> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker settings / WSL config. My bootstrap script creates `minikube` with an 8,192 MB limit and adds `minikube-m02` with Minikube's default (~4 GB limit). The converged, idle stack uses ~5 GiB and ran in an 8.8 GB Docker VM, so 10–12 GB is headroom for cold image pulls and sustained load; on Docker's default 4 GB, expect `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
 > - **CPUs:** Allocate **4+ vCPUs** to prevent CPU throttling during concurrent 70 RPS load generation.
 > - **Disk:** Ensure **40 GB+ free disk space**. The containerd image stores on the two nodes measured **~8.2 GB** (5.1 GB + 3.1 GB); see the breakdown in the [README](../README.md#-container-image-footprint-82-gb-on-disk).
 
