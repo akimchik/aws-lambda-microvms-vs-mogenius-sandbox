@@ -76,15 +76,6 @@ mongodb:
     effect: "NoSchedule"
   persistence:
     enabled: false
-  podSecurityContext:
-    enabled: true
-    fsGroup: 0
-  containerSecurityContext:
-    enabled: true
-    runAsUser: 0
-  securityContext:
-    runAsUser: 0
-    fsGroup: 0
   extraEnvVars:
     - name: BITNAMI_DEBUG
       value: "true"
