@@ -19,7 +19,7 @@ jobs:
         include:
           # 1. macOS on Apple Silicon (arm64 / Homebrew flow)
           - name: "macOS (Apple Silicon M-series arm64)"
-            os: macos-14
+            os: macos-latest
 
           # 2. Linux Ubuntu (x86_64 / apt flow)
           - name: "Linux Ubuntu (x86_64 / apt)"
