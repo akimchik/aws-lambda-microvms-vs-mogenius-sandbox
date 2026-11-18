@@ -18,6 +18,10 @@ Whether starting from a completely wiped environment (`minikube delete`) or waki
 ```bash
 # Reconcile all 8 architecture layers (or pass --upgrade-helm to force Helm chart upgrades)
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+
+# Or pass custom memory on 8 GB hosts/VMs to prevent RSRC_OVER_ALLOC_MEM:
+# ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 6144
+# (Recommended: expand VM memory to 10 GB on host: VBoxManage modifyvm "<VM_NAME>" --memory 10240)
 ```
 
 What `bootstrap_cluster.sh` automatically checks and converges against the codebase:

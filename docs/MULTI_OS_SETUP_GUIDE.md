@@ -222,6 +222,42 @@ If your VM uses a **Bridged Adapter** on your local network:
    * **Prometheus:** `http://prometheus.local:8080`
    * **Sandbox Router:** `http://sandbox.local:8080`
 
+#### 4. Satisfying the 8,192 MB Requirement & Fixing `RSRC_OVER_ALLOC_MEM`
+If your Linux VM or host has 8 GB of assigned RAM, the Linux kernel reserves memory for BIOS and hardware page tables, leaving approximately ~7,957 MB total. If Minikube attempts to start requesting the full 8,192 MB, it aborts with:
+```text
+Exiting due to RSRC_OVER_ALLOC_MEM: Requested memory allocation 8192MB is more than your system limit 7957MB.
+```
+
+**Recommended: One-Liners to Add Memory to Satisfy the Full Requirement (10 GB – 12 GB):**
+* **VirtualBox VM (run from your Mac / Host terminal):**
+  Shut down the VM, then expand RAM to 10 GB (10,240 MB) or 12 GB (12,288 MB):
+  ```bash
+  VBoxManage modifyvm "<Your-VM-Name>" --memory 10240
+  ```
+  *(To find your exact VM name: `VBoxManage list vms`)*
+* **Docker Desktop on macOS:**
+  Set Docker VM memory to 10 GB:
+  ```bash
+  sed -i '' 's/"memoryMiB":[0-9]*/"memoryMiB":10240/' ~/Library/Group\ Containers/group.com.docker/settings.json
+  ```
+* **Windows WSL 2 (PowerShell):**
+  Set WSL 2 memory limit to 12 GB:
+  ```powershell
+  Set-Content -Path $HOME\.wslconfig -Value "[wsl2]`nmemory=12GB" ; wsl --shutdown
+  ```
+
+**Alternative: If System RAM Cannot Be Increased on Host:**
+* **Automatic Memory Clamping:** `bootstrap_cluster.sh` automatically detects host system RAM and safely clamps node allocation (e.g. to `6144 MB`) whenever host RAM is below 8,192 MB.
+* **CLI Memory Flag:** You can pass `--memory <MB>` directly to the reconciler:
+  ```bash
+  ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 6144
+  ```
+* **Pre-start Minikube Manually:**
+  ```bash
+  minikube start --driver=docker --container-runtime=containerd --cpus=4 --memory=6144
+  ```
+  *(Once running, `bootstrap_cluster.sh` will detect the active cluster and skip node recreation).*
+
 ---
 
 ## 🪟 3. Windows 10 / 11 Setup (via WSL 2 + Ubuntu)

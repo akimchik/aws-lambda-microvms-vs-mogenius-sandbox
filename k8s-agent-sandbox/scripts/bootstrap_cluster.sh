@@ -47,17 +47,32 @@ K8S_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FORCE_HELM=false
 PREFLIGHT_ONLY=false
 CI_MODE=false
+CUSTOM_MEM="${MINIKUBE_MEMORY:-}"
 
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --upgrade-helm)
             FORCE_HELM=true
+            shift
             ;;
         --preflight-only|--dry-run)
             PREFLIGHT_ONLY=true
+            shift
             ;;
         --ci)
             CI_MODE=true
+            shift
+            ;;
+        --memory)
+            CUSTOM_MEM="$2"
+            shift 2
+            ;;
+        --memory=*)
+            CUSTOM_MEM="${1#*=}"
+            shift
+            ;;
+        *)
+            shift
             ;;
     esac
 done
@@ -220,10 +235,39 @@ echo -e "\n${YELLOW}[1/8] Checking Minikube & Multi-Node Topology...${NC}"
 
 CLUSTER_CPUS=4
 CLUSTER_MEM=8192
+
 if [ "$CI_MODE" = true ]; then
     CLUSTER_CPUS=2
     CLUSTER_MEM=4096
     echo -e "  ${CYAN}[>]${NC} CI Mode active: Sizing Minikube to ${CLUSTER_CPUS} CPUs, ${CLUSTER_MEM} MB RAM."
+elif [ -n "$CUSTOM_MEM" ]; then
+    CLUSTER_MEM="$CUSTOM_MEM"
+    echo -e "  ${CYAN}[>]${NC} Custom memory requested: Sizing Minikube to ${CLUSTER_MEM} MB RAM."
+else
+    # Auto-detect host system RAM to prevent RSRC_OVER_ALLOC_MEM on 8GB hosts/VMs
+    SYS_MEM_MB=0
+    if [ "${OS_NAME}" == "Linux" ]; then
+        SYS_MEM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo 0)
+    elif [ "${OS_NAME}" == "Darwin" ]; then
+        SYS_MEM_MB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}' || echo 0)
+    fi
+
+    if [ -n "$SYS_MEM_MB" ] && [ "$SYS_MEM_MB" -gt 0 ] 2>/dev/null; then
+        if [ "$SYS_MEM_MB" -lt 8192 ]; then
+            # Host has < 8192 MB (e.g. an 8 GB VM with ~7957 MB reported).
+            # Reserve at least 1.2 GB for the host OS and clamp node memory to 6144 MB.
+            SAFE_MEM=$(( SYS_MEM_MB - 1200 ))
+            if [ "$SAFE_MEM" -lt 3072 ]; then
+                SAFE_MEM=3072
+            fi
+            if [ "$SAFE_MEM" -gt 6144 ]; then
+                SAFE_MEM=6144
+            fi
+            CLUSTER_MEM="$SAFE_MEM"
+            echo -e "  ${YELLOW}[!] Detected host RAM (${SYS_MEM_MB} MB) is below 8192 MB.${NC}"
+            echo -e "  ${YELLOW}[!] Automatically adjusting primary node allocation to ${CLUSTER_MEM} MB to prevent RSRC_OVER_ALLOC_MEM.${NC}"
+        fi
+    fi
 fi
 
 if ! minikube status >/dev/null 2>&1; then
