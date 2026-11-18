@@ -16,6 +16,7 @@ This repository contains the end-to-end reference architectures, deployment mani
 * **Part 3 (Threat Model, Egress Broker & Testkube Security Deep-Dive):** [Beyond Kernel Isolation: Why Egress Control and Zero-In-Guest Credentials Make or Break AI Agent Sandboxes](docs/THREAT_MODEL_EGRESS_AND_CREDENTIALS.md)
 * **Functional Specification & Deep Comparison:** [AWS Lambda MicroVMs vs. mogenius (Kubernetes Agent Sandbox)](docs/AWS_LAMBDA_MICROVMS_VS_MOGENIUS_FUNCTIONAL_SPEC.md)
 * **Live Demo & Verification Runbook:** [Kubernetes vs. AWS MicroVMs Demo Runbook](docs/DEMO_RUNBOOK.md)
+* **Multi-OS & Multi-Architecture Guide:** [macOS, Linux & Windows (WSL 2) Setup Guide](docs/MULTI_OS_SETUP_GUIDE.md) *(covering `aarch64` & `x86_64`)*
 
 ---
 
@@ -72,6 +73,7 @@ This repository contains the end-to-end reference architectures, deployment mani
     ├── FOLLOW_UP_ARTICLE_K8S_VS_MICROVMS.md
     ├── THREAT_MODEL_EGRESS_AND_CREDENTIALS.md
     ├── DEMO_RUNBOOK.md
+    ├── MULTI_OS_SETUP_GUIDE.md
     ├── ARTICLE_IMAGES.md
     ├── WORKFLOW_HISTORY.md
     └── images/                          # Architecture diagrams & article cover banners
@@ -93,16 +95,21 @@ This repository contains the end-to-end reference architectures, deployment mani
 
 ---
 
-## 💻 Hardware & Docker Resource Requirements (Prerequisites)
+## 💻 Hardware & Multi-OS Resource Requirements (Prerequisites)
 
 Running a production-grade 2-node Kubernetes cluster locally (`minikube` control-plane + `minikube-m02` worker) with Google gVisor kernel virtualization, Prometheus + Grafana OSS, MongoDB, and automated Testkube load generation is an enterprise-scale architecture.
 
-**Required host tooling:** Docker Desktop, `minikube`, `kubectl`, and `helm`. The `testkube` CLI is installed through Homebrew by `bootstrap_cluster.sh` if it is missing. The AWS half of the repo additionally needs the AWS CLI and AWS SAM CLI.
+**Supported Environments & Architectures:**
+* **OS:** macOS (Apple Silicon / Intel), Linux (Ubuntu, Debian, RHEL, Fedora), and Windows 10/11 (via WSL 2 + Ubuntu).
+* **CPU Architectures:** Both **`aarch64` (ARM64)** and **`x86_64` (AMD64)** are fully supported with multi-architecture OCI manifests and dynamic gVisor (`runsc`) package resolution.
+* **Detailed Setup:** For operating system and architecture-specific installation instructions, see the **[Multi-OS & Multi-Architecture Setup Guide](docs/MULTI_OS_SETUP_GUIDE.md)**.
+
+**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, and `helm`. The `testkube` CLI is automatically installed by `bootstrap_cluster.sh` (via Homebrew on macOS, or the official Linux installer on Linux/WSL2) if missing.
 
 > [!IMPORTANT]
-> **Docker Desktop Resource Allocations:**
-> Do **NOT** run this stack with default Docker Desktop settings (4 GB RAM / 2 CPUs); Grafana, MongoDB or the gVisor sandbox pods will be `OOMKilled` (Exit Code 137).
-> - **Memory:** I recommend a **10 GB – 12 GB** Docker VM. `bootstrap_cluster.sh` creates `minikube` with an 8,192 MB limit, and `minikube-m02` is added with Minikube's default (~4 GB limit), so the container limits add up to ~12 GB. On my machine the converged, idle stack uses **~5 GiB** and runs inside an 8.8 GB Docker VM; 10–12 GB is headroom for cold image pulls and sustained 70 RPS load, not a measured minimum.
+> **Resource Sizing (macOS Docker Desktop / Linux / Windows WSL 2):**
+> Do **NOT** run this stack with default settings (4 GB RAM / 2 CPUs); Grafana, MongoDB or the gVisor sandbox pods will be `OOMKilled` (Exit Code 137).
+> - **Memory:** I recommend **10 GB – 12 GB** dedicated to Docker/WSL. `bootstrap_cluster.sh` creates `minikube` with an 8,192 MB limit, and `minikube-m02` is added with Minikube's default (~4 GB limit), so the container limits add up to ~12 GB. On my machine the converged, idle stack uses **~5 GiB** and runs inside an 8.8 GB Docker VM; 10–12 GB is headroom for cold image pulls and sustained 70 RPS load, not a measured minimum.
 > - **CPUs:** **4+ vCPUs** (`minikube` is created with `--cpus=4`) to avoid throttling during load generation, gVisor syscall interception, and Prometheus TSDB indexing.
 > - **Disk:** **40 GB+ free** (see the measured image footprint below).
 

@@ -48,6 +48,118 @@ echo -e "${BLUE}Minikube Agent Sandbox & Testkube Full-Stack Reconciler${NC}"
 echo -e "${BLUE}============================================================${NC}"
 
 # ==============================================================================
+# [0/8] Host OS, Architecture & Toolchain Discovery
+# ==============================================================================
+# Cross-Platform Architecture Support:
+#   • macOS (Darwin): Native Apple Silicon (arm64) flow using Homebrew for tools.
+#   • Linux: Dynamic distro detection:
+#       - Debian/Ubuntu: apt-get for system deps, official curl binaries for cloud tooling.
+#       - RHEL/Fedora/Rocky/Alma: dnf/yum for system deps, official curl binaries for cloud tooling.
+#       - Generic Linux: Direct official curl binary installers.
+#   • Architectures: Both x86_64 (amd64) and aarch64 (arm64) fully supported.
+# ==============================================================================
+echo -e "\n${YELLOW}[0/8] Detecting Host OS, Architecture & Toolchain...${NC}"
+
+OS_NAME="$(uname -s)"
+RAW_ARCH="$(uname -m)"
+
+case "${RAW_ARCH}" in
+    x86_64|amd64)
+        ARCH_CLI="amd64"
+        ARCH_RUNSC="x86_64"
+        ;;
+    arm64|aarch64)
+        ARCH_CLI="arm64"
+        ARCH_RUNSC="aarch64"
+        ;;
+    *)
+        echo -e "  ${RED}✗ Unsupported CPU architecture: ${RAW_ARCH}${NC}"
+        exit 1
+        ;;
+esac
+
+if [ "${OS_NAME}" == "Darwin" ]; then
+    HOST_PLATFORM="macOS"
+    PKG_MGR="brew"
+    echo -e "  ${CYAN}[>]${NC} Host: ${GREEN}macOS (Darwin)${NC} | Arch: ${GREEN}${RAW_ARCH}${NC} | Toolchain: ${GREEN}Homebrew${NC}"
+
+    # macOS flow: strictly Homebrew
+    if ! command -v brew >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ Homebrew not found. Please install Homebrew: https://brew.sh${NC}"
+        exit 1
+    fi
+
+    for tool in minikube kubectl helm; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo -e "  ${CYAN}[>]${NC} Installing missing host tool '$tool' via Homebrew..."
+            brew install "$tool"
+        fi
+    done
+elif [ "${OS_NAME}" == "Linux" ]; then
+    HOST_PLATFORM="Linux"
+    if command -v apt-get >/dev/null 2>&1; then
+        PKG_MGR="apt"
+    elif command -v dnf >/dev/null 2>&1; then
+        PKG_MGR="dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        PKG_MGR="yum"
+    else
+        PKG_MGR="generic"
+    fi
+    echo -e "  ${CYAN}[>]${NC} Host: ${GREEN}Linux${NC} | Arch: ${GREEN}${RAW_ARCH} (${ARCH_CLI})${NC} | Package Manager: ${GREEN}${PKG_MGR}${NC}"
+
+    # Verify standard system utilities
+    BASE_TOOLS=(curl ca-certificates tar python3)
+    MISSING_BASE=()
+    for t in "${BASE_TOOLS[@]}"; do
+        command -v "$t" >/dev/null 2>&1 || MISSING_BASE+=("$t")
+    done
+
+    if [ ${#MISSING_BASE[@]} -gt 0 ]; then
+        echo -e "  ${CYAN}[>]${NC} Installing missing system dependencies: ${MISSING_BASE[*]}..."
+        if [ "$PKG_MGR" == "apt" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq "${MISSING_BASE[@]}"
+        elif [ "$PKG_MGR" == "dnf" ] || [ "$PKG_MGR" == "yum" ]; then
+            sudo "$PKG_MGR" install -y "${MISSING_BASE[@]}"
+        fi
+    fi
+
+    install_host_bin() {
+        local src="$1"
+        local dst="$2"
+        chmod +x "$src"
+        if [ -w "/usr/local/bin" ]; then
+            mv "$src" "$dst"
+        else
+            sudo mv "$src" "$dst"
+        fi
+    }
+
+    # Install Kubernetes host tooling via official multi-arch binary / script installers if missing
+    if ! command -v kubectl >/dev/null 2>&1; then
+        echo -e "  ${CYAN}[>]${NC} 'kubectl' not found. Installing official multi-arch binary (${ARCH_CLI})..."
+        K8S_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+        curl -fsSL --retry 3 "https://dl.k8s.io/release/${K8S_VER}/bin/linux/${ARCH_CLI}/kubectl" -o /tmp/kubectl
+        install_host_bin /tmp/kubectl /usr/local/bin/kubectl
+    fi
+
+    if ! command -v minikube >/dev/null 2>&1; then
+        echo -e "  ${CYAN}[>]${NC} 'minikube' not found. Installing official multi-arch binary (${ARCH_CLI})..."
+        curl -fsSL --retry 3 "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${ARCH_CLI}" -o /tmp/minikube
+        install_host_bin /tmp/minikube /usr/local/bin/minikube
+    fi
+
+    if ! command -v helm >/dev/null 2>&1; then
+        echo -e "  ${CYAN}[>]${NC} 'helm' not found. Installing official Helm via curl script..."
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    fi
+else
+    echo -e "  ${RED}✗ Unsupported operating system: ${OS_NAME}${NC}"
+    exit 1
+fi
+echo -e "  ${GREEN}✓${NC} Host platform and toolchain verified."
+
+# ==============================================================================
 # [1/8] Check / Start Minikube & Multi-Node Worker Topology
 # ==============================================================================
 # Why multi-node?
@@ -140,14 +252,18 @@ echo -e "\n${YELLOW}[3/8] Reconciling containerd & native gVisor (runsc) runtime
 echo -e "  ${CYAN}[>]${NC} Checking native Google gVisor (runsc) binary and containerd runtime on primary node..."
 minikube ssh "
 set -e
-# Install official Google runsc binary if missing or corrupted
-if ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
-    echo '  -> Downloading and installing official Google gVisor (runsc) package...'
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq apt-transport-https ca-certificates curl gnupg
-    curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg --yes
-    echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
-    sudo apt-get update -qq && sudo apt-get install --reinstall -y -qq runsc
+# Clean up stale/broken OBS kubic repositories baked into older minikube kicbase images
+sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
+
+# Install official Google runsc binary if missing, corrupted, or non-functional
+if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
+    echo '  -> Downloading official Google gVisor (runsc) static binaries from Google Cloud Storage...'
+    NODE_ARCH=\$(uname -m)
+    URL=\"https://storage.googleapis.com/gvisor/releases/release/latest/\${NODE_ARCH}\"
+    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/runsc\" -o /tmp/runsc
+    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/containerd-shim-runsc-v1\" -o /tmp/containerd-shim-runsc-v1
+    chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
+    sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
 fi
 
 # Ensure containerd config.toml has exactly one runsc runtime stanza
@@ -350,8 +466,14 @@ echo -e "\n${YELLOW}[8/8] Reconciling Testkube OSS & Benchmark/Security TestWork
 
 # Check for Testkube CLI on local host machine
 if ! command -v testkube >/dev/null 2>&1; then
-    echo -e "  ${CYAN}[>]${NC} Testkube CLI not found on host. Installing via Homebrew..."
-    brew install kubeshop/testkube/testkube || brew install testkube
+    echo -e "  ${CYAN}[>]${NC} Testkube CLI not found on host. Installing..."
+    if [ "${OS_NAME}" == "Darwin" ]; then
+        echo -e "  ${CYAN}[>]${NC} Installing via Homebrew..."
+        brew install kubeshop/testkube/testkube || brew install testkube
+    else
+        echo -e "  ${CYAN}[>]${NC} Installing via official Linux installer..."
+        curl -sSLf https://get.testkube.io | bash
+    fi
 fi
 
 # Reconcile Testkube Helm release on worker node
