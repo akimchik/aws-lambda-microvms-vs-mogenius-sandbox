@@ -27,7 +27,9 @@
 #
 # USAGE MODES:
 #   • Cold Start from Scratch : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
-#   • Force Helm Upgrades    : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --upgrade-helm
+#   • Force Helm Upgrades     : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --upgrade-helm
+#   • CI Mode (Lower Sizing)  : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --ci
+#   • Preflight/Dry-Run Only  : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
 # ==============================================================================
 set -euo pipefail
 
@@ -41,7 +43,24 @@ NC='\033[0m' # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-FORCE_HELM="${1:-}"
+
+FORCE_HELM=false
+PREFLIGHT_ONLY=false
+CI_MODE=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --upgrade-helm)
+            FORCE_HELM=true
+            ;;
+        --preflight-only|--dry-run)
+            PREFLIGHT_ONLY=true
+            ;;
+        --ci)
+            CI_MODE=true
+            ;;
+    esac
+done
 
 echo -e "${BLUE}============================================================${NC}"
 echo -e "${BLUE}Minikube Agent Sandbox & Testkube Full-Stack Reconciler${NC}"
@@ -159,6 +178,14 @@ else
 fi
 echo -e "  ${GREEN}✓${NC} Host platform and toolchain verified."
 
+if [ "$PREFLIGHT_ONLY" = true ]; then
+    echo -e "\n${GREEN}============================================================${NC}"
+    echo -e "${GREEN}Preflight & Toolchain Discovery Successful (--preflight-only)!${NC}"
+    echo -e "${GREEN}============================================================${NC}"
+    echo -e "Host: ${GREEN}${HOST_PLATFORM}${NC} | Arch: ${GREEN}${RAW_ARCH} (${ARCH_CLI})${NC} | Toolchain: ${GREEN}${PKG_MGR}${NC}"
+    exit 0
+fi
+
 # ==============================================================================
 # [1/8] Check / Start Minikube & Multi-Node Worker Topology
 # ==============================================================================
@@ -170,13 +197,21 @@ echo -e "  ${GREEN}✓${NC} Host platform and toolchain verified."
 # ==============================================================================
 echo -e "\n${YELLOW}[1/8] Checking Minikube & Multi-Node Topology...${NC}"
 
+CLUSTER_CPUS=4
+CLUSTER_MEM=8192
+if [ "$CI_MODE" = true ]; then
+    CLUSTER_CPUS=2
+    CLUSTER_MEM=4096
+    echo -e "  ${CYAN}[>]${NC} CI Mode active: Sizing Minikube to ${CLUSTER_CPUS} CPUs, ${CLUSTER_MEM} MB RAM."
+fi
+
 if ! minikube status >/dev/null 2>&1; then
     if minikube profile list 2>/dev/null | grep -q "minikube"; then
         echo -e "  ${CYAN}[>]${NC} Existing Minikube profile found (stopped). Starting Minikube primary node..."
         minikube start --driver=docker
     else
-        echo -e "  ${CYAN}[>]${NC} No Minikube cluster found. Creating fresh cluster from scratch (4 CPUs, 8192 MB RAM)..."
-        minikube start --driver=docker --cpus=4 --memory=8192
+        echo -e "  ${CYAN}[>]${NC} No Minikube cluster found. Creating fresh cluster from scratch (${CLUSTER_CPUS} CPUs, ${CLUSTER_MEM} MB RAM)..."
+        minikube start --driver=docker --cpus="${CLUSTER_CPUS}" --memory="${CLUSTER_MEM}"
     fi
 else
     echo -e "  ${GREEN}✓${NC} Primary node 'minikube' is running."
@@ -354,7 +389,7 @@ if ! helm status monitoring -n monitoring >/dev/null 2>&1 || \
    ! kubectl -n monitoring get deployment monitoring-kube-prometheus-operator >/dev/null 2>&1 || \
    ! kubectl -n monitoring get deployment monitoring-kube-state-metrics >/dev/null 2>&1 || \
    ! kubectl -n monitoring get statefulset prometheus-monitoring-kube-prometheus-prometheus >/dev/null 2>&1 || \
-   [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
+   [ "${FORCE_HELM}" = true ]; then
     echo -e "  ${CYAN}[>]${NC} Installing / recovering kube-prometheus-stack in namespace 'monitoring'..."
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
     helm repo update prometheus-community >/dev/null
@@ -394,7 +429,7 @@ echo -e "\n${YELLOW}[6/8] Reconciling mogenius Agent Sandbox, Warm Pool & Router
 if ! helm status agent-sandbox -n agent-sandbox-system >/dev/null 2>&1 || \
    ! kubectl -n agent-sandbox-system get deployment agent-sandbox-controller >/dev/null 2>&1 || \
    ! kubectl -n agent-sandbox get sandboxwarmpool default >/dev/null 2>&1 || \
-   [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
+   [ "${FORCE_HELM}" = true ]; then
     echo -e "  ${CYAN}[>]${NC} Installing / recovering mogenius-agent-sandbox in 'agent-sandbox-system'..."
     helm repo add mogenius https://helm.mogenius.com/public >/dev/null 2>&1 || true
     helm repo update mogenius >/dev/null
@@ -482,7 +517,7 @@ if ! helm status testkube -n testkube >/dev/null 2>&1 || \
    ! kubectl -n testkube get deployment testkube-mongodb >/dev/null 2>&1 || \
    ! kubectl -n testkube get statefulset testkube-nats >/dev/null 2>&1 || \
    ! kubectl -n testkube get deployment testkube-minio-testkube >/dev/null 2>&1 || \
-   [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
+   [ "${FORCE_HELM}" = true ]; then
     echo -e "  ${CYAN}[>]${NC} Installing / recovering Testkube OSS on dedicated worker node 'minikube-m02'..."
     helm repo add kubeshop https://kubeshop.github.io/helm-charts >/dev/null 2>&1 || true
     helm repo update kubeshop >/dev/null
