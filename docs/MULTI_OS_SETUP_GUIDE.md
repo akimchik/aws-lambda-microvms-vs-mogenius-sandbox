@@ -92,7 +92,7 @@ sudo sysctl --system
 
 ### B. Install Docker Engine (Community Edition)
 
-#### On Debian / Ubuntu (`apt`):
+#### On Debian / Ubuntu (`apt` - `x86_64` & `aarch64`):
 ```bash
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl gnupg
@@ -104,11 +104,13 @@ sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io
 ```
 
-#### On RHEL / Rocky / Alma / Fedora (`dnf` / `yum`):
+#### On RHEL / Rocky Linux 9 / AlmaLinux 9 / Fedora (`dnf` / `yum` - `x86_64` & `aarch64`):
 ```bash
 sudo dnf install -y dnf-plugins-core
-sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
-sudo dnf install -y docker-ce docker-ce-cli containerd.io
+# Docker CE repository natively supports both x86_64 and aarch64 (ARM64)
+sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+  sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+sudo dnf install -y --allowerasing docker-ce docker-ce-cli containerd.io
 ```
 
 #### Post-Installation (All Linux Distros):
@@ -172,6 +174,53 @@ echo "Minikube IP: ${MINIKUBE_IP}"
 * **Grafana Dashboard:** `http://grafana.${MINIKUBE_IP}.nip.io` (user: `admin` | pass: `admin`)
 * **Prometheus UI:** `http://prometheus.${MINIKUBE_IP}.nip.io`
 * **Sandbox Ingress Router:** `http://sandbox.${MINIKUBE_IP}.nip.io`
+
+### F. Performance Optimizations for Linux Virtual Machines (VirtualBox / UTM)
+When running Linux inside a virtual machine on a macOS or Windows host, apply these proven engineering optimizations:
+
+#### 1. Run Headless & Disable Graphical Desktop (`gdm3` / `lightdm`)
+Desktop environments (GNOME Shell, lightdm, Wayland/X11, Mutter) consume **1.5 GB – 2 GB of RAM** and waste **15–30% of a CPU core** on display compositing. To maximize CPU & RAM for gVisor and k6 load tests:
+```bash
+# Isolate multi-user text console immediately:
+sudo systemctl isolate multi-user.target
+
+# Disable display manager service permanently across reboots:
+sudo systemctl disable display-manager
+
+# (If using lightdm):
+sudo systemctl stop lightdm && sudo systemctl disable lightdm
+```
+
+#### 2. Prevent `NetworkManager-wait-online` Boot Hangs
+If your VM hangs for 120 seconds during boot at *"A start job is running for Wait for Network to be Configured..."*, `disable` is insufficient because `network-online.target` pulls it back in. Mask both services to bypass the hang permanently:
+```bash
+sudo systemctl mask NetworkManager-wait-online.service
+sudo systemctl mask systemd-networkd-wait-online.service
+```
+
+#### 3. Remote Ingress Access over Bridged / Local Wi-Fi Network
+If your VM uses a **Bridged Adapter** on your local network:
+1. Find your VM's LAN IP:
+   ```bash
+   hostname -I | awk '{print $1}'
+   # Example: 192.168.1.75
+   ```
+2. Start the Ingress port-forward bound to `0.0.0.0`:
+   ```bash
+   # Unprivileged port 8080 (no sudo needed):
+   kubectl -n ingress-nginx port-forward --address 0.0.0.0 svc/ingress-nginx-controller 8080:80
+
+   # Or standard port 80 (explicitly passing user KUBECONFIG to sudo):
+   sudo KUBECONFIG=$HOME/.kube/config kubectl -n ingress-nginx port-forward --address 0.0.0.0 svc/ingress-nginx-controller 80:80
+   ```
+3. On your host machine's `/etc/hosts` (`sudo nano /etc/hosts` on macOS/Linux), map the domains:
+   ```text
+   <VM-LAN-IP> grafana.local prometheus.local sandbox.local
+   ```
+4. Access directly from your host browser:
+   * **Grafana:** `http://grafana.local:8080` (or `http://grafana.local` if on port 80)
+   * **Prometheus:** `http://prometheus.local:8080`
+   * **Sandbox Router:** `http://sandbox.local:8080`
 
 ---
 

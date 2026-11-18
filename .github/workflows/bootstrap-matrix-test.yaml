@@ -50,11 +50,19 @@ jobs:
           ./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
 
   # ============================================================================
-  # Enterprise Linux Container: RHEL / Rocky Linux 9 (dnf package manager)
+  # Enterprise Linux Container: RHEL / Rocky Linux 9 (dnf package manager - x86_64 & aarch64)
   # ============================================================================
   rhel-dnf-matrix-test:
-    name: "Enterprise Linux Rocky Linux 9 (x86_64 / dnf)"
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Enterprise Linux Rocky Linux 9 (x86_64 / dnf)"
+            os: ubuntu-latest
+          - name: "Enterprise Linux Rocky Linux 9 (aarch64 / dnf)"
+            os: ubuntu-24.04-arm
     container:
       image: rockylinux:9
     steps:
