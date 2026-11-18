@@ -578,8 +578,8 @@ fi
 
 # Reconcile Testkube Helm release on worker node
 if ! helm status testkube -n testkube >/dev/null 2>&1 || \
-   ! kubectl -n testkube get deployment testkube-api-server >/dev/null 2>&1 || \
-   ! kubectl -n testkube get deployment testkube-mongodb >/dev/null 2>&1 || \
+   [ "$(kubectl -n testkube get deployment testkube-api-server -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" != "1" ] || \
+   [ "$(kubectl -n testkube get deployment testkube-mongodb -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" != "1" ] || \
    ! kubectl -n testkube get statefulset testkube-nats >/dev/null 2>&1 || \
    ! kubectl -n testkube get deployment testkube-minio-testkube >/dev/null 2>&1 || \
    [ "${FORCE_HELM}" = true ]; then
