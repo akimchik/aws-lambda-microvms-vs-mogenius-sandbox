@@ -301,27 +301,15 @@ if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd
     sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
 fi
 
-# Ensure containerd config.toml has exactly one runsc runtime stanza
-sudo python3 -c '
-import subprocess
-path = \"/etc/containerd/config.toml\"
-with open(path, \"r\") as f:
-    content = f.read()
-target = \"[plugins.\\\"io.containerd.grpc.v1.cri\\\".containerd.runtimes.runsc]\"
-stanza = target + \"\n  runtime_type = \\\"io.containerd.runsc.v1\\\"\n\"
-parts = content.split(target)
-if len(parts) == 1:
-    clean = content.rstrip() + \"\n\n\" + stanza
-elif len(parts) > 2:
-    clean = parts[0] + target + parts[1]
-else:
-    clean = content
-if clean != content:
-    with open(\"/tmp/config.toml.clean\", \"w\") as out:
-        out.write(clean)
-    subprocess.run([\"sudo\", \"mv\", \"/tmp/config.toml.clean\", path], check=True)
-    subprocess.run([\"sudo\", \"systemctl\", \"restart\", \"containerd\"], check=True)
-'
+# Ensure containerd config.toml has the runsc runtime handler stanza (zero python dependency)
+CONFIG_PATH="/etc/containerd/config.toml"
+TARGET='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]'
+
+if ! grep -qF "\$TARGET" "\$CONFIG_PATH" 2>/dev/null; then
+    echo '  -> Injecting runsc runtime handler into containerd config...'
+    printf '\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]\n  runtime_type = \"io.containerd.runsc.v1\"\n' | sudo tee -a "\$CONFIG_PATH" >/dev/null
+    sudo systemctl restart containerd
+fi
 "
 
 # Register the gVisor RuntimeClass with Kubernetes API
