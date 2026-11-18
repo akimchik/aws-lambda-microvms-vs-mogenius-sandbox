@@ -3,8 +3,9 @@
 This runbook contains step-by-step instructions to run a live demo comparing **AWS Lambda MicroVMs** and **Kubernetes Agent Sandbox (mogenius)** on your local Minikube cluster.
 
 > [!IMPORTANT]
-> **Docker Desktop Prerequisites (Do Not Use Defaults):**
-> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker Desktop settings. My bootstrap script creates `minikube` with an 8,192 MB limit and adds `minikube-m02` with Minikube's default (~4 GB limit). The converged, idle stack uses ~5 GiB and ran for me in an 8.8 GB Docker VM, so 10–12 GB is headroom for cold image pulls and sustained load; on Docker's default 4 GB, expect `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
+> **Host OS & Architecture Prerequisites (macOS, Linux & Windows WSL 2):**
+> - **Cross-Platform Guide:** For comprehensive setup on **Linux (Ubuntu/Debian/RHEL)**, **Windows (WSL 2)**, or **macOS**, along with **`aarch64` (Apple Silicon)** vs. **`x86_64` (AMD64/Intel)** architecture specifics, refer to the [Multi-OS & Multi-Architecture Setup Guide](MULTI_OS_SETUP_GUIDE.md).
+> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker settings / WSL config. My bootstrap script creates `minikube` with an 8,192 MB limit and adds `minikube-m02` with Minikube's default (~4 GB limit). The converged, idle stack uses ~5 GiB and ran in an 8.8 GB Docker VM, so 10–12 GB is headroom for cold image pulls and sustained load; on Docker's default 4 GB, expect `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
 > - **CPUs:** Allocate **4+ vCPUs** to prevent CPU throttling during concurrent 70 RPS load generation.
 > - **Disk:** Ensure **40 GB+ free disk space**. The containerd image stores on the two nodes measured **~8.2 GB** (5.1 GB + 3.1 GB); see the breakdown in the [README](../README.md#-container-image-footprint-82-gb-on-disk).
 
@@ -17,6 +18,10 @@ Whether starting from a completely wiped environment (`minikube delete`) or waki
 ```bash
 # Reconcile all 8 architecture layers (or pass --upgrade-helm to force Helm chart upgrades)
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+
+# Or pass custom memory on 8 GB hosts/VMs to prevent RSRC_OVER_ALLOC_MEM:
+# ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 6144
+# (Recommended: expand VM memory to 10 GB on host: VBoxManage modifyvm "<VM_NAME>" --memory 10240)
 ```
 
 What `bootstrap_cluster.sh` automatically checks and converges against the codebase:
@@ -27,7 +32,7 @@ What `bootstrap_cluster.sh` automatically checks and converges against the codeb
 5. **Observability Stack (`monitoring`):** Deploys `kube-prometheus-stack` via Helm and reconciles `monitoring-ingress.yaml` plus all 3 Grafana dashboards.
 6. **Agent Sandbox & Dynamic Router (`agent-sandbox-system` / `agent-sandbox`):** Deploys `mogenius-agent-sandbox` (`v1.2.1`), `sandbox-router`, `sandbox-ingress`, `ServiceMonitor`, and `sandbox-latency-exporter`.
 7. **Out-of-Sandbox Egress & Credential Broker (`sandbox-egress-system`):** Reconciles `egress-broker.yaml` and cross-namespace zero-trust `NetworkPolicy` rules.
-8. **Testkube OSS & Automated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), and registers both `agent-sandbox-benchmark` and `agent-sandbox-security-audit`.
+8. **Testkube OSS & Automated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), and registers all 3 TestWorkflows (`agent-sandbox-benchmark`, `agent-sandbox-security-audit`, and `agent-sandbox-sustained-load`).
 
 ---
 
@@ -68,7 +73,10 @@ Both Prometheus and Grafana are routed via the NGINX Ingress controller:
 * **Prometheus Targets & Query UI:**
   * Host URL: `http://prometheus.127.0.0.1.nip.io` (or `http://prometheus.local`)
 
-*(Note: On macOS Docker driver, you can access Ingress via `minikube tunnel` or by port-forwarding the Ingress controller: `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80`)*
+*(Note on Ingress Access across OSes:
+  • **macOS:** Run `minikube tunnel` (which bridges `127.0.0.1` on Darwin), or run port-forwarding: `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80`.
+  • **Linux Native:** `minikube tunnel` does not proxy localhost for NodePort Ingress. Use `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80` for `127.0.0.1.nip.io:8080` access, or access directly via `http://grafana.$(minikube ip).nip.io`.
+  • **Linux VM (VirtualBox / UTM):** If running in a VM on a bridged or host-only network, run `kubectl -n ingress-nginx port-forward --address 0.0.0.0 svc/ingress-nginx-controller 8080:80` and map `<VM-LAN-IP> grafana.local prometheus.local sandbox.local` in your host `/etc/hosts` for direct browser access. See [Section 2.F of the Multi-OS Setup Guide](MULTI_OS_SETUP_GUIDE.md#f-performance-optimizations-for-linux-virtual-machines-virtualbox--utm) for details).*
 
 ---
 

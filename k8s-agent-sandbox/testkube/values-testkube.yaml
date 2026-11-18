@@ -76,6 +76,10 @@ mongodb:
     effect: "NoSchedule"
   persistence:
     enabled: false
+  extraEnvVars:
+    # Fix for MongoDB 8.0+ on Linux kernel >= 6.19 (SERVER-121912: TCMalloc rseq ABI incompatibility)
+    - name: GLIBC_TUNABLES
+      value: "glibc.pthread.rseq=1"
   resources:
     requests:
       cpu: 100m
