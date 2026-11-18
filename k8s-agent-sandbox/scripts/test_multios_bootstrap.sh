@@ -260,16 +260,18 @@ echo -e "\n${YELLOW}[5/6] Testing Live Network Reachability for Multi-Arch Asset
 if curl -s --max-time 3 -I "https://storage.googleapis.com" >/dev/null 2>&1; then
     for narch in "x86_64" "aarch64"; do
         BZ2_URL="https://storage.googleapis.com/gvisor/releases/release/latest/${narch}/gvisor.tar.bz2"
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$BZ2_URL" || echo "000")
-        if [ "$HTTP_CODE" -eq 200 ]; then
+        HTTP_RAW=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 10 "$BZ2_URL" 2>/dev/null) || HTTP_RAW="000"
+        HTTP_CODE="${HTTP_RAW: -3}"
+        if [ "$HTTP_CODE" == "200" ]; then
             assert_test "Live HTTP 200: Google gVisor release archive (${narch})" 0
         else
             assert_test "Live HTTP 200: Google gVisor release archive (${narch}) (status: ${HTTP_CODE})" 1
         fi
     done
 
-    MK_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64" || echo "000")
-    if [ "$MK_CODE" -eq 200 ]; then
+    MK_RAW=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 10 "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64" 2>/dev/null) || MK_RAW="000"
+    MK_CODE="${MK_RAW: -3}"
+    if [ "$MK_CODE" == "200" ]; then
         assert_test "Live HTTP 200: Minikube multi-arch binary endpoint" 0
     else
         assert_test "Live HTTP 200: Minikube multi-arch binary endpoint (status: ${MK_CODE})" 1
