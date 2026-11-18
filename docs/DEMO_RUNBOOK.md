@@ -69,7 +69,9 @@ Both Prometheus and Grafana are routed via the NGINX Ingress controller:
 * **Prometheus Targets & Query UI:**
   * Host URL: `http://prometheus.127.0.0.1.nip.io` (or `http://prometheus.local`)
 
-*(Note: On macOS Docker driver, you can access Ingress via `minikube tunnel` or by port-forwarding the Ingress controller: `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80`)*
+*(Note on Ingress Access across OSes:
+  • **macOS:** Run `minikube tunnel` (which bridges `127.0.0.1` on Darwin), or run port-forwarding: `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80`.
+  • **Linux:** `minikube tunnel` does not proxy localhost for NodePort Ingress. Use `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80` for `127.0.0.1.nip.io:8080` access, or access directly via `http://grafana.$(minikube ip).nip.io`).*
 
 ---
 

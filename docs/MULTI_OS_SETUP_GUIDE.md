@@ -146,7 +146,25 @@ curl -sSLf https://get.testkube.io | bash
 ```
 
 ### E. Ingress Access on Linux
-On Linux, `minikube ip` is directly routable on the host's Docker bridge network.
+On Linux, Minikube networking operates differently from macOS:
+* **Why `minikube tunnel` doesn't expose localhost on Linux:** On macOS, `minikube tunnel` contains a Darwin-specific loopback proxy that binds `127.0.0.1` to the VM. On Linux, `minikube tunnel` only routes ClusterIPs for `type: LoadBalancer` services. Because the Ingress controller uses `NodePort` / `hostPort`, `minikube tunnel` will show `services: []`.
+
+Use one of these two methods to access Ingress on Linux:
+
+#### Option 1: Port-Forward to `localhost` (Universal & matches macOS nip.io URLs)
+Run this command in a separate terminal:
+```bash
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80
+```
+Then access directly via `localhost`:
+* **Grafana Dashboard:** `http://grafana.127.0.0.1.nip.io:8080` (user: `admin` | pass: `admin`)
+* **Prometheus UI:** `http://prometheus.127.0.0.1.nip.io:8080`
+* **Sandbox Ingress Router:** `http://sandbox.127.0.0.1.nip.io:8080`
+
+*(Tip for VirtualBox / UTM: To access from your Mac host browser, add `--address 0.0.0.0` and set up VM Port Forwarding for port 8080).*
+
+#### Option 2: Direct Minikube IP (Linux Native without port-forwarding)
+The primary node IP is directly reachable on Linux's Docker bridge network:
 ```bash
 MINIKUBE_IP=$(minikube ip)
 echo "Minikube IP: ${MINIKUBE_IP}"
