@@ -139,7 +139,7 @@ elif [ "${OS_NAME}" == "Linux" ]; then
         if [ "$PKG_MGR" == "apt" ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq "${MISSING_BASE[@]}"
         elif [ "$PKG_MGR" == "dnf" ] || [ "$PKG_MGR" == "yum" ]; then
-            sudo "$PKG_MGR" install -y "${MISSING_BASE[@]}"
+            sudo "$PKG_MGR" install -y --allowerasing "${MISSING_BASE[@]}" 2>/dev/null || sudo "$PKG_MGR" install -y "${MISSING_BASE[@]}"
         fi
     fi
 
