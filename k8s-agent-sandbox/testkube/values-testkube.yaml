@@ -76,13 +76,25 @@ mongodb:
     effect: "NoSchedule"
   persistence:
     enabled: false
+  podSecurityContext:
+    enabled: true
+    fsGroup: 0
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 0
+  securityContext:
+    runAsUser: 0
+    fsGroup: 0
+  extraEnvVars:
+    - name: BITNAMI_DEBUG
+      value: "true"
   resources:
     requests:
       cpu: 100m
-      memory: 256Mi
+      memory: 128Mi
     limits:
       cpu: 1000m
-      memory: 1024Mi
+      memory: 384Mi
 
 testkube-dashboard:
   enabled: false
