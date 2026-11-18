@@ -179,7 +179,7 @@ PLATFORM_TEST_CASES=(
 for case_entry in "${PLATFORM_TEST_CASES[@]}"; do
     IFS="|" read -r t_os t_arch exp_cli exp_runsc exp_mgr mock_tool <<< "$case_entry"
 
-    (
+    if (
         export MOCK_OS="$t_os"
         export MOCK_ARCH="$t_arch"
         TEST_DIR="${MOCK_TMP_DIR}/test_${t_os}_${t_arch}_${exp_mgr}"
@@ -191,15 +191,14 @@ for case_entry in "${PLATFORM_TEST_CASES[@]}"; do
             chmod +x "${TEST_DIR}/${mock_tool}"
         fi
 
-        export PATH="${TEST_DIR}:/bin:/usr/bin"
+        export PATH="${TEST_DIR}"
         # Call REAL detect_platform from bootstrap_cluster.sh
         detect_platform >/dev/null
 
         [ "$ARCH_CLI" == "$exp_cli" ] && \
         [ "$ARCH_RUNSC" == "$exp_runsc" ] && \
         [ "$PKG_MGR" == "$exp_mgr" ]
-    )
-    if [ $? -eq 0 ]; then
+    ); then
         assert_test "detect_platform(): ${t_os} ${t_arch} -> cli:${exp_cli}, runsc:${exp_runsc}, pkg:${exp_mgr}" 0
     else
         assert_test "detect_platform(): ${t_os} ${t_arch} -> cli:${exp_cli}, runsc:${exp_runsc}, pkg:${exp_mgr}" 1
@@ -207,21 +206,27 @@ for case_entry in "${PLATFORM_TEST_CASES[@]}"; do
 done
 
 # Test unsupported architecture and OS handling in detect_platform()
-(
+if (
     export MOCK_OS="Linux"
     export MOCK_ARCH="mips64"
-    export PATH="${MOCK_BIN}:/bin:/usr/bin"
-    ! detect_platform 2>/dev/null
-) && assert_test "detect_platform(): Rejects unsupported architecture (mips64)" 0 || \
-   assert_test "detect_platform(): Rejects unsupported architecture (mips64)" 1
+    export PATH="${MOCK_BIN}"
+    detect_platform 2>/dev/null
+); then
+    assert_test "detect_platform(): Rejects unsupported architecture (mips64)" 1
+else
+    assert_test "detect_platform(): Rejects unsupported architecture (mips64)" 0
+fi
 
-(
+if (
     export MOCK_OS="FreeBSD"
     export MOCK_ARCH="x86_64"
-    export PATH="${MOCK_BIN}:/bin:/usr/bin"
-    ! detect_platform 2>/dev/null
-) && assert_test "detect_platform(): Rejects unsupported OS (FreeBSD)" 0 || \
-   assert_test "detect_platform(): Rejects unsupported OS (FreeBSD)" 1
+    export PATH="${MOCK_BIN}"
+    detect_platform 2>/dev/null
+); then
+    assert_test "detect_platform(): Rejects unsupported OS (FreeBSD)" 1
+else
+    assert_test "detect_platform(): Rejects unsupported OS (FreeBSD)" 0
+fi
 
 # Test parse_args() validation
 (
