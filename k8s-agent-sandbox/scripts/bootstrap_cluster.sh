@@ -140,14 +140,18 @@ echo -e "\n${YELLOW}[3/8] Reconciling containerd & native gVisor (runsc) runtime
 echo -e "  ${CYAN}[>]${NC} Checking native Google gVisor (runsc) binary and containerd runtime on primary node..."
 minikube ssh "
 set -e
-# Install official Google runsc binary if missing or corrupted
-if ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
-    echo '  -> Downloading and installing official Google gVisor (runsc) package...'
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq apt-transport-https ca-certificates curl gnupg
-    curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg --yes
-    echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
-    sudo apt-get update -qq && sudo apt-get install --reinstall -y -qq runsc
+# Clean up stale/broken OBS kubic repositories baked into minikube kicbase images
+sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
+
+# Install official Google runsc binary if missing, corrupted, or non-functional
+if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
+    echo '  -> Downloading official Google gVisor (runsc) static binaries from Google Cloud Storage...'
+    ARCH=\$(uname -m)
+    URL=\"https://storage.googleapis.com/gvisor/releases/release/latest/\${ARCH}\"
+    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/runsc\" -o /tmp/runsc
+    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/containerd-shim-runsc-v1\" -o /tmp/containerd-shim-runsc-v1
+    chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
+    sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
 fi
 
 # Ensure containerd config.toml has exactly one runsc runtime stanza
@@ -350,8 +354,14 @@ echo -e "\n${YELLOW}[8/8] Reconciling Testkube OSS & Benchmark/Security TestWork
 
 # Check for Testkube CLI on local host machine
 if ! command -v testkube >/dev/null 2>&1; then
-    echo -e "  ${CYAN}[>]${NC} Testkube CLI not found on host. Installing via Homebrew..."
-    brew install kubeshop/testkube/testkube || brew install testkube
+    echo -e "  ${CYAN}[>]${NC} Testkube CLI not found on host. Installing..."
+    if command -v brew >/dev/null 2>&1; then
+        echo -e "  ${CYAN}[>]${NC} Installing via Homebrew..."
+        brew install kubeshop/testkube/testkube || brew install testkube
+    else
+        echo -e "  ${CYAN}[>]${NC} Homebrew not detected (Linux/WSL2). Installing via official Testkube installer..."
+        curl -sSLf https://get.testkube.io | bash
+    fi
 fi
 
 # Reconcile Testkube Helm release on worker node
