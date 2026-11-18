@@ -80,7 +80,7 @@ mongodb:
     - name: BITNAMI_DEBUG
       value: "true"
     - name: GLIBC_TUNABLES
-      value: "glibc.pthread.rseq=0"
+      value: "glibc.pthread.rseq=1"
   resources:
     requests:
       cpu: 100m
