@@ -32,7 +32,7 @@ What `bootstrap_cluster.sh` automatically checks and converges against the codeb
 5. **Observability Stack (`monitoring`):** Deploys `kube-prometheus-stack` via Helm and reconciles `monitoring-ingress.yaml` plus all 3 Grafana dashboards.
 6. **Agent Sandbox & Dynamic Router (`agent-sandbox-system` / `agent-sandbox`):** Deploys `mogenius-agent-sandbox` (`v1.2.1`), `sandbox-router`, `sandbox-ingress`, `ServiceMonitor`, and `sandbox-latency-exporter`.
 7. **Out-of-Sandbox Egress & Credential Broker (`sandbox-egress-system`):** Reconciles `egress-broker.yaml` and cross-namespace zero-trust `NetworkPolicy` rules.
-8. **Testkube OSS & Automated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), and registers both `agent-sandbox-benchmark` and `agent-sandbox-security-audit`.
+8. **Testkube OSS & Automated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), and registers all 3 TestWorkflows (`agent-sandbox-benchmark`, `agent-sandbox-security-audit`, and `agent-sandbox-sustained-load`).
 
 ---
 

@@ -108,8 +108,13 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io
 ```bash
 sudo dnf install -y dnf-plugins-core
 # Docker CE repository natively supports both x86_64 and aarch64 (ARM64)
+# On RHEL / CentOS / Rocky / Alma:
 sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
   sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+
+# On Fedora (if using Fedora directly or DNF5):
+# sudo dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo
+
 sudo dnf install -y --allowerasing docker-ce docker-ce-cli containerd.io
 ```
 
@@ -127,16 +132,17 @@ sudo systemctl enable --now docker
 # Determine CPU architecture: 'amd64' or 'arm64'
 ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-# 1. Minikube
-curl -LO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${ARCH}"
+# 1. Minikube (fail fast on HTTP errors with -fsSL)
+curl -fsSLO "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${ARCH}"
 sudo install "minikube-linux-${ARCH}" /usr/local/bin/minikube && rm "minikube-linux-${ARCH}"
 
 # 2. Kubectl
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl"
+K8S_RELEASE=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+curl -fsSLO "https://dl.k8s.io/release/${K8S_RELEASE}/bin/linux/${ARCH}/kubectl"
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
 
 # 3. Helm v3
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
 # 4. Testkube CLI (Official Linux installer)
 curl -sSLf https://get.testkube.io | bash
@@ -236,9 +242,14 @@ Exiting due to RSRC_OVER_ALLOC_MEM: Requested memory allocation 8192MB is more t
   ```
   *(To find your exact VM name: `VBoxManage list vms`)*
 * **Docker Desktop on macOS:**
-  Set Docker VM memory to 10 GB:
+  Set Docker VM memory to 10 GB or 12 GB via **Docker Desktop Settings -> Resources -> Memory**, or quit Docker Desktop and update settings:
   ```bash
-  sed -i '' 's/"memoryMiB":[0-9]*/"memoryMiB":10240/' ~/Library/Group\ Containers/group.com.docker/settings.json
+  # Quit Docker Desktop first, then update settings (settings.json or settings-store.json):
+  osascript -e 'quit app "Docker"' 2>/dev/null || true
+  for cfg in "$HOME/Library/Group Containers/group.com.docker/settings-store.json" "$HOME/Library/Group Containers/group.com.docker/settings.json"; do
+    [ -f "$cfg" ] && sed -i '' 's/"memoryMiB":[0-9]*/"memoryMiB":10240/' "$cfg" 2>/dev/null || true
+  done
+  open -a Docker
   ```
 * **Windows WSL 2 (PowerShell):**
   Set WSL 2 memory limit to 12 GB:
@@ -247,7 +258,7 @@ Exiting due to RSRC_OVER_ALLOC_MEM: Requested memory allocation 8192MB is more t
   ```
 
 **Alternative: If System RAM Cannot Be Increased on Host:**
-* **Automatic Memory Clamping:** `bootstrap_cluster.sh` automatically detects host system RAM and safely clamps node allocation (e.g. to `6144 MB`) whenever host RAM is below 8,192 MB.
+* **Automatic Docker Daemon & Memory Clamping:** `bootstrap_cluster.sh` inspects the Docker daemon's total memory ceiling directly (`docker info --format '{{.MemTotal}}'`) before falling back to host RAM, accurately detecting Docker Desktop VM ceilings on macOS as well as native Linux limits, and safely clamps primary node allocation (e.g. to `6144 MB`) whenever available memory is below 8,192 MB.
 * **CLI Memory Flag:** You can pass `--memory <MB>` directly to the reconciler:
   ```bash
   ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 6144

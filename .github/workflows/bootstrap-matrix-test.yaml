@@ -2,7 +2,7 @@ name: Multi-OS & Multi-Architecture Bootstrap Matrix
 
 on:
   push:
-    branches: [ "main", "feat-*" ]
+    branches: [ "**" ]
   pull_request:
     branches: [ "main" ]
 
@@ -33,15 +33,29 @@ jobs:
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
+      - name: Install Test Utilities (Ruby / PyYAML)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ruby python3-yaml
+
       - name: Validate Shell Script Syntax (bash -n)
         run: |
           bash -n k8s-agent-sandbox/scripts/bootstrap_cluster.sh
           bash -n k8s-agent-sandbox/ingress/test_ingress_poc.sh
           bash -n k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
 
-      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight Validation
+      - name: Verify CLI Help & Fail-Fast Argument Parsing
         run: |
           chmod +x k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+          ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --help
+          # Assert fail-fast on invalid flags
+          if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --bogus-flag 2>/dev/null; then exit 1; fi
+          if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 2>/dev/null; then exit 1; fi
+          if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory abc 2>/dev/null; then exit 1; fi
+
+      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight Validation
+        run: |
           ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
 
       - name: Run Automated Component & Manifest Deployment Test Suite
@@ -66,9 +80,9 @@ jobs:
     container:
       image: rockylinux:9
     steps:
-      - name: Install Base Utilities (git, bash, tar, bzip2)
+      - name: Install Base Utilities (git, bash, tar, bzip2, ruby/python)
         run: |
-          dnf install -y --allowerasing git bash tar bzip2 findutils sudo
+          dnf install -y --allowerasing git bash tar bzip2 findutils sudo ruby python3-pyyaml
 
       - name: Checkout Codebase
         uses: actions/checkout@v4
@@ -79,9 +93,16 @@ jobs:
           bash -n k8s-agent-sandbox/ingress/test_ingress_poc.sh
           bash -n k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
 
-      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight Validation on RHEL (dnf)
+      - name: Verify CLI Help & Fail-Fast Argument Parsing
         run: |
           chmod +x k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+          ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --help
+          if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --bogus-flag 2>/dev/null; then exit 1; fi
+          if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 2>/dev/null; then exit 1; fi
+          if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory abc 2>/dev/null; then exit 1; fi
+
+      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight Validation on RHEL (dnf)
+        run: |
           ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
 
       - name: Run Automated Component & Manifest Deployment Test Suite on RHEL

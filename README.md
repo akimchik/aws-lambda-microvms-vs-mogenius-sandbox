@@ -24,6 +24,8 @@ This repository contains the end-to-end reference architectures, deployment mani
 
 ```text
 .
+├── .github/workflows/
+│   └── bootstrap-matrix-test.yaml       # Multi-OS (macOS, Ubuntu, Rocky Linux) & Multi-Arch (x86_64, aarch64) CI matrix
 ├── aws-lambda-microvms/                 # Original AWS Lambda MicroVMs (Firecracker) Workshop
 │   ├── module-1/                        # Basic MicroVM execution & Port-9000 lifecycle hooks
 │   ├── module-2/                        # Event-driven Pull Request code reviewer
@@ -34,7 +36,8 @@ This repository contains the end-to-end reference architectures, deployment mani
 │
 ├── k8s-agent-sandbox/                   # Kubernetes Agent Sandbox (mogenius + Google gVisor)
 │   ├── scripts/
-│   │   └── bootstrap_cluster.sh         # 8-stage idempotent cluster reconciler & self-healing bootstrapper
+│   │   ├── bootstrap_cluster.sh         # 8-stage idempotent cluster reconciler & self-healing bootstrapper
+│   │   └── test_multios_bootstrap.sh    # Multi-OS & multi-arch integration test suite (sources reconciler)
 │   ├── helm/
 │   │   └── values-mogenius.yaml         # Helm values enabling gVisor RuntimeClass & NetworkPolicies
 │   ├── module-1-basic-execution/
