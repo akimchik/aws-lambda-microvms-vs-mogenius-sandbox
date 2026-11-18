@@ -128,7 +128,7 @@ elif [ "${OS_NAME}" == "Linux" ]; then
     echo -e "  ${CYAN}[>]${NC} Host: ${GREEN}Linux${NC} | Arch: ${GREEN}${RAW_ARCH} (${ARCH_CLI})${NC} | Package Manager: ${GREEN}${PKG_MGR}${NC}"
 
     # Verify standard system utilities
-    BASE_TOOLS=(curl ca-certificates tar python3)
+    BASE_TOOLS=(curl ca-certificates tar jq)
     MISSING_BASE=()
     for t in "${BASE_TOOLS[@]}"; do
         command -v "$t" >/dev/null 2>&1 || MISSING_BASE+=("$t")
@@ -147,7 +147,8 @@ elif [ "${OS_NAME}" == "Linux" ]; then
         local src="$1"
         local dst="$2"
         chmod +x "$src"
-        if [ -w "/usr/local/bin" ]; then
+        local dst_dir="$(dirname "$dst")"
+        if [ -w "$dst_dir" ]; then
             mv "$src" "$dst"
         else
             sudo mv "$src" "$dst"
@@ -162,10 +163,30 @@ elif [ "${OS_NAME}" == "Linux" ]; then
         install_host_bin /tmp/kubectl /usr/local/bin/kubectl
     fi
 
+    # Minikube check and upgrade if missing or outdated (< v1.30)
+    MINIKUBE_BIN="$(command -v minikube 2>/dev/null || echo "/usr/local/bin/minikube")"
+    NEED_MINIKUBE=false
     if ! command -v minikube >/dev/null 2>&1; then
-        echo -e "  ${CYAN}[>]${NC} 'minikube' not found. Installing official multi-arch binary (${ARCH_CLI})..."
+        NEED_MINIKUBE=true
+    else
+        MK_VER=$(minikube version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+' | head -n1 | tr -d 'v' || echo "0.0")
+        MK_MAJOR=$(echo "$MK_VER" | cut -d. -f1)
+        MK_MINOR=$(echo "$MK_VER" | cut -d. -f2)
+        if [ -n "$MK_MAJOR" ] && [ -n "$MK_MINOR" ]; then
+            if [ "$MK_MAJOR" -lt 1 ] || { [ "$MK_MAJOR" -eq 1 ] && [ "$MK_MINOR" -lt 30 ]; }; then
+                echo -e "  ${YELLOW}[!] Detected outdated Minikube (v${MK_VER}). Modern container sandboxing requires Minikube >= v1.30.${NC}"
+                NEED_MINIKUBE=true
+            fi
+        fi
+    fi
+
+    if [ "$NEED_MINIKUBE" = true ]; then
+        echo -e "  ${CYAN}[>]${NC} Installing latest official multi-arch Minikube (${ARCH_CLI})..."
         curl -fsSL --retry 3 "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-${ARCH_CLI}" -o /tmp/minikube
-        install_host_bin /tmp/minikube /usr/local/bin/minikube
+        install_host_bin /tmp/minikube "$MINIKUBE_BIN"
+        if [ "$MINIKUBE_BIN" != "/usr/local/bin/minikube" ]; then
+            install_host_bin /tmp/minikube /usr/local/bin/minikube
+        fi
     fi
 
     if ! command -v helm >/dev/null 2>&1; then
@@ -208,13 +229,21 @@ fi
 if ! minikube status >/dev/null 2>&1; then
     if minikube profile list 2>/dev/null | grep -q "minikube"; then
         echo -e "  ${CYAN}[>]${NC} Existing Minikube profile found (stopped). Starting Minikube primary node..."
-        minikube start --driver=docker
+        minikube start --driver=docker --container-runtime=containerd
     else
         echo -e "  ${CYAN}[>]${NC} No Minikube cluster found. Creating fresh cluster from scratch (${CLUSTER_CPUS} CPUs, ${CLUSTER_MEM} MB RAM)..."
-        minikube start --driver=docker --cpus="${CLUSTER_CPUS}" --memory="${CLUSTER_MEM}"
+        minikube start --driver=docker --container-runtime=containerd --cpus="${CLUSTER_CPUS}" --memory="${CLUSTER_MEM}"
     fi
 else
     echo -e "  ${GREEN}✓${NC} Primary node 'minikube' is running."
+fi
+
+# Check if running cluster uses containerd runtime
+CRI_RUNTIME=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}' 2>/dev/null || echo "")
+if [ -n "$CRI_RUNTIME" ] && echo "$CRI_RUNTIME" | grep -qE '^docker://'; then
+    echo -e "  ${YELLOW}⚠ WARNING: Cluster node runtime is legacy dockershim (${CRI_RUNTIME}). Native gVisor RuntimeClass requires containerd.${NC}"
+    echo -e "  ${YELLOW}If sandboxes fail to schedule, please recreate the cluster with containerd:${NC}"
+    echo -e "      minikube delete && ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh\n"
 fi
 
 # Verify or add dedicated worker node 'minikube-m02'
@@ -285,32 +314,80 @@ echo -e "  ${GREEN}✓${NC} control-plane.minikube.internal mapped to ${CP_IP}."
 echo -e "\n${YELLOW}[3/8] Reconciling containerd & native gVisor (runsc) runtime...${NC}"
 
 echo -e "  ${CYAN}[>]${NC} Checking native Google gVisor (runsc) binary and containerd runtime on primary node..."
-minikube ssh "
+minikube ssh '
 set -e
 # Clean up stale/broken OBS kubic repositories baked into older minikube kicbase images
 sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
 
 # Install official Google runsc binary if missing, corrupted, or non-functional
 if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
-    echo '  -> Downloading official Google gVisor (runsc) static binaries from Google Cloud Storage...'
-    NODE_ARCH=\$(uname -m)
-    URL=\"https://storage.googleapis.com/gvisor/releases/release/latest/\${NODE_ARCH}\"
-    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/runsc\" -o /tmp/runsc
-    curl -fsSL --retry 3 --retry-delay 2 \"\${URL}/containerd-shim-runsc-v1\" -o /tmp/containerd-shim-runsc-v1
-    chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
-    sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
+    echo "  -> Downloading official Google gVisor release archive..."
+    NODE_ARCH=$(uname -m)
+    case "$NODE_ARCH" in
+        x86_64|amd64) GVISOR_ARCH="x86_64" ;;
+        aarch64|arm64) GVISOR_ARCH="aarch64" ;;
+        *) GVISOR_ARCH="$NODE_ARCH" ;;
+    esac
+    URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
+
+    INSTALLED=false
+    # Method 1: Official bz2 release archive (contains runsc + containerd-shim-runsc-v1)
+    if curl -fsSL --retry 3 --retry-delay 2 "${URL}/gvisor.tar.bz2" -o /tmp/gvisor.tar.bz2 2>/dev/null; then
+        if tar -xjf /tmp/gvisor.tar.bz2 -C /tmp/ 2>/dev/null; then
+            chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1 2>/dev/null || true
+            sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
+            rm -f /tmp/gvisor.tar.bz2
+            INSTALLED=true
+        fi
+    fi
+
+    # Method 2: Official zstd release archive
+    if [ "$INSTALLED" = false ] && curl -fsSL --retry 3 --retry-delay 2 "${URL}/gvisor.tar.zstd" -o /tmp/gvisor.tar.zstd 2>/dev/null; then
+        if tar --zstd -xf /tmp/gvisor.tar.zstd -C /tmp/ 2>/dev/null; then
+            chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1 2>/dev/null || true
+            sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
+            rm -f /tmp/gvisor.tar.zstd
+            INSTALLED=true
+        fi
+    fi
+
+    # Method 3: Fallback to official Google APT repository
+    if [ "$INSTALLED" = false ] && command -v apt-get >/dev/null 2>&1; then
+        echo "  -> Fallback: installing gVisor via Google APT repository..."
+        curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg --yes 2>/dev/null || true
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
+        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/gvisor.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" 2>/dev/null || sudo apt-get update 2>/dev/null || true
+        sudo apt-get install -y runsc 2>/dev/null || true
+        if /usr/bin/runsc --version >/dev/null 2>&1; then
+            INSTALLED=true
+        fi
+    fi
+
+    if ! /usr/bin/runsc --version >/dev/null 2>&1; then
+        echo "ERROR: Failed to install Google gVisor (runsc) on Minikube node." >&2
+        exit 1
+    fi
 fi
 
-# Ensure containerd config.toml has the runsc runtime handler stanza (zero python dependency)
+# Ensure containerd config.toml exists and has the runsc runtime handler stanza (zero python dependency)
 CONFIG_PATH="/etc/containerd/config.toml"
-TARGET='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]'
+TARGET="[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]"
 
-if ! grep -qF "\$TARGET" "\$CONFIG_PATH" 2>/dev/null; then
-    echo '  -> Injecting runsc runtime handler into containerd config...'
-    printf '\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]\n  runtime_type = \"io.containerd.runsc.v1\"\n' | sudo tee -a "\$CONFIG_PATH" >/dev/null
-    sudo systemctl restart containerd
+if [ ! -f "$CONFIG_PATH" ]; then
+    sudo mkdir -p /etc/containerd
+    if command -v containerd >/dev/null 2>&1; then
+        containerd config default | sudo tee "$CONFIG_PATH" >/dev/null 2>&1 || sudo touch "$CONFIG_PATH"
+    else
+        sudo touch "$CONFIG_PATH"
+    fi
 fi
-"
+
+if ! grep -qF "$TARGET" "$CONFIG_PATH" 2>/dev/null; then
+    echo "  -> Injecting runsc runtime handler into containerd config..."
+    printf "\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]\n  runtime_type = \"io.containerd.runsc.v1\"\n" | sudo tee -a "$CONFIG_PATH" >/dev/null
+    sudo systemctl restart containerd 2>/dev/null || true
+fi
+'
 
 # Register the gVisor RuntimeClass with Kubernetes API
 echo -e "  ${CYAN}[>]${NC} Registering Kubernetes RuntimeClass 'gvisor' (handler: runsc)..."

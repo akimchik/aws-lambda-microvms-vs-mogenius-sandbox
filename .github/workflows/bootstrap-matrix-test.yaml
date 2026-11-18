@@ -58,9 +58,9 @@ jobs:
     container:
       image: rockylinux:9
     steps:
-      - name: Install Base Utilities (git, bash, tar)
+      - name: Install Base Utilities (git, bash, tar, bzip2)
         run: |
-          dnf install -y --allowerasing git bash tar findutils sudo
+          dnf install -y --allowerasing git bash tar bzip2 findutils sudo
 
       - name: Checkout Codebase
         uses: actions/checkout@v4
