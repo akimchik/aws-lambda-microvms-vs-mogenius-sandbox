@@ -72,9 +72,11 @@
     if [ "$FILE_MAX" -lt "$REQ_FILE_MAX" ] || [ "$NR_OPEN" -lt "$REQ_NR_OPEN" ]; then
       ADJUST="true"
     fi
-    for f in /etc/sysctl.d/99-kubernetes-sandbox.conf /etc/security/limits.d/99-kubernetes-sandbox-nofile.conf /etc/systemd/system.conf.d/99-nofile.conf /etc/systemd/user.conf.d/99-nofile.conf; do
-      if [ ! -f "$f" ]; then ADJUST="true"; fi
-    done
+    VM_MAX=$(sysctl -n vm.max_map_count 2>/dev/null || echo "0")
+    INOTIFY_WATCH=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo "0")
+    if [ "$VM_MAX" -lt 262144 ] || [ "$INOTIFY_WATCH" -lt 524288 ]; then
+      ADJUST="true"
+    fi
     echo "FILE_MAX=$FILE_MAX"
     echo "NR_OPEN=$NR_OPEN"
     echo "NEEDS_ADJUSTMENT=$ADJUST"

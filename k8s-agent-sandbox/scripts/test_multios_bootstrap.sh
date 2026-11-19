@@ -285,6 +285,123 @@ fi
     [ "$FORCE_ASK_BECOME" = true ]
 ) && assert_test "parse_args(): Accepts --ask-become-pass" 0 || assert_test "parse_args(): Accepts --ask-become-pass" 1
 
+# ==============================================================================
+# Sudo & Privilege Escalation Mode Detection Tests (Ubuntu vs Rocky vs macOS)
+# ==============================================================================
+
+# Test detect_sudo_mode(): Linux non-root with sudo requiring password -> SUDO_NEEDS_PASS=true
+(
+    HOST_PLATFORM="Linux"
+    FORCE_ASK_BECOME=false
+    MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_fail"
+    mkdir -p "$MOCK_SUDO_DIR"
+    cat << 'EOF' > "${MOCK_SUDO_DIR}/sudo"
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "${MOCK_SUDO_DIR}/sudo"
+    PATH="${MOCK_SUDO_DIR}:${PATH}"
+    detect_sudo_mode
+    [ "$SUDO_NEEDS_PASS" = true ]
+) && assert_test "detect_sudo_mode(): Detects sudo requires password on Linux non-root" 0 || \
+   assert_test "detect_sudo_mode(): Detects sudo requires password on Linux non-root" 1
+
+# Test detect_sudo_mode(): Linux non-root with passwordless sudo -> SUDO_NEEDS_PASS=false
+(
+    HOST_PLATFORM="Linux"
+    FORCE_ASK_BECOME=false
+    MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_ok"
+    mkdir -p "$MOCK_SUDO_DIR"
+    cat << 'EOF' > "${MOCK_SUDO_DIR}/sudo"
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${MOCK_SUDO_DIR}/sudo"
+    PATH="${MOCK_SUDO_DIR}:${PATH}"
+    detect_sudo_mode
+    [ "$SUDO_NEEDS_PASS" = false ]
+) && assert_test "detect_sudo_mode(): Detects passwordless sudo on Linux non-root" 0 || \
+   assert_test "detect_sudo_mode(): Detects passwordless sudo on Linux non-root" 1
+
+# Test detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS
+(
+    HOST_PLATFORM="macOS"
+    FORCE_ASK_BECOME=false
+    MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_fail"
+    PATH="${MOCK_SUDO_DIR}:${PATH}"
+    detect_sudo_mode
+    [ "$SUDO_NEEDS_PASS" = false ]
+) && assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS" 0 || \
+   assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS" 1
+
+# Test build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password
+(
+    HOST_PLATFORM="Linux"
+    FORCE_ASK_BECOME=false
+    SUDO_NEEDS_PASS=true
+    FORCE_HELM=false
+    CI_MODE=false
+    CUSTOM_MEM=""
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = true ]
+) && assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password" 0 || \
+   assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password" 1
+
+# Test build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless
+(
+    HOST_PLATFORM="Linux"
+    FORCE_ASK_BECOME=false
+    SUDO_NEEDS_PASS=false
+    FORCE_HELM=false
+    CI_MODE=false
+    CUSTOM_MEM=""
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = false ]
+) && assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless" 0 || \
+   assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless" 1
+
+# Test build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed
+(
+    HOST_PLATFORM="Linux"
+    FORCE_ASK_BECOME=true
+    SUDO_NEEDS_PASS=false
+    FORCE_HELM=false
+    CI_MODE=false
+    CUSTOM_MEM=""
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = true ]
+) && assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed" 0 || \
+   assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed" 1
+
+# Test build_ansible_args(): NEVER appends --ask-become-pass on macOS
+(
+    HOST_PLATFORM="macOS"
+    FORCE_ASK_BECOME=true
+    SUDO_NEEDS_PASS=true
+    FORCE_HELM=false
+    CI_MODE=false
+    CUSTOM_MEM=""
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = false ]
+) && assert_test "build_ansible_args(): Never appends --ask-become-pass on macOS" 0 || \
+   assert_test "build_ansible_args(): Never appends --ask-become-pass on macOS" 1
+
 # Fail-fast error tests for parse_args
 if ( parse_args --memory >/dev/null 2>&1 ); then
     assert_test "parse_args(): Fails fast on missing --memory argument" 1
@@ -428,6 +545,44 @@ fi
 ) && assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 0 || \
    assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 1
 
+# Regression Test: prime_sudo() skips sudo -v when SUDO_NEEDS_PASS=true to avoid double password prompt and TTY masking
+(
+    HOST_PLATFORM="Linux"
+    SUDO_NEEDS_PASS=true
+    MOCK_SUDO_V_DIR="${MOCK_TMP_DIR}/mock_sudo_v_fail"
+    mkdir -p "$MOCK_SUDO_V_DIR"
+    cat << 'EOF' > "${MOCK_SUDO_V_DIR}/sudo"
+#!/bin/sh
+if [ "$1" = "-v" ]; then
+    echo "ERROR: sudo -v should not have been called!" >&2
+    exit 99
+fi
+exit 1
+EOF
+    chmod +x "${MOCK_SUDO_V_DIR}/sudo"
+    PATH="${MOCK_SUDO_V_DIR}:${PATH}"
+    # prime_sudo should exit 0 without invoking sudo -v
+    prime_sudo
+) && assert_test "prime_sudo(): Skips sudo -v when SUDO_NEEDS_PASS=true to avoid double password prompt" 0 || \
+   assert_test "prime_sudo(): Skips sudo -v when SUDO_NEEDS_PASS=true to avoid double password prompt" 1
+
+# Regression Test: prime_sudo() immediately exits on macOS
+(
+    HOST_PLATFORM="macOS"
+    SUDO_NEEDS_PASS=false
+    MOCK_SUDO_ERR_DIR="${MOCK_TMP_DIR}/mock_sudo_mac_err"
+    mkdir -p "$MOCK_SUDO_ERR_DIR"
+    cat << 'EOF' > "${MOCK_SUDO_ERR_DIR}/sudo"
+#!/bin/sh
+echo "ERROR: sudo called on macOS!" >&2
+exit 99
+EOF
+    chmod +x "${MOCK_SUDO_ERR_DIR}/sudo"
+    PATH="${MOCK_SUDO_ERR_DIR}:${PATH}"
+    prime_sudo
+) && assert_test "prime_sudo(): Exits immediately on macOS without invoking sudo" 0 || \
+   assert_test "prime_sudo(): Exits immediately on macOS without invoking sudo" 1
+
 # Regression Test: Host-side gVisor archive extraction (tar -xjf / Python tarfile)
 (
     TEST_UNPACK_DIR="${MOCK_TMP_DIR}/gvisor_test_unpack"
@@ -477,6 +632,70 @@ if ! awk '/ansible_facts..system.. == .Darwin./,/(tags:)/' "${K8S_DIR}/ansible/t
 else
     assert_test "tasks/00_host_prep.yml: Darwin tasks execute without become/sudo and require no host sysctl" 1
 fi
+
+# Regression Test: tasks/00_host_prep.yml sysctl audit logic evaluates NEEDS_ADJUSTMENT=false when kernel limits are already sufficient (Ubuntu)
+(
+    MOCK_SYSCTL_HIGH_DIR="${MOCK_TMP_DIR}/mock_sysctl_high"
+    mkdir -p "$MOCK_SYSCTL_HIGH_DIR"
+    cat << 'EOF' > "${MOCK_SYSCTL_HIGH_DIR}/sysctl"
+#!/bin/sh
+case "$2" in
+    fs.file-max) echo "9223372036854775807" ;;
+    fs.nr_open) echo "2147483584" ;;
+    vm.max_map_count) echo "262144" ;;
+    fs.inotify.max_user_watches) echo "1048576" ;;
+    *) echo "0" ;;
+esac
+EOF
+    chmod +x "${MOCK_SYSCTL_HIGH_DIR}/sysctl"
+    PATH="${MOCK_SYSCTL_HIGH_DIR}:${PATH}"
+
+    FILE_MAX=$(sysctl -n fs.file-max 2>/dev/null || echo "0")
+    NR_OPEN=$(sysctl -n fs.nr_open 2>/dev/null || echo "0")
+    VM_MAX=$(sysctl -n vm.max_map_count 2>/dev/null || echo "0")
+    INOTIFY_WATCH=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo "0")
+    REQ_FILE_MAX=2097152
+    REQ_NR_OPEN=2097152
+    ADJUST="false"
+    if [ "$FILE_MAX" -lt "$REQ_FILE_MAX" ] || [ "$NR_OPEN" -lt "$REQ_NR_OPEN" ] || \
+       [ "$VM_MAX" -lt 262144 ] || [ "$INOTIFY_WATCH" -lt 524288 ]; then
+      ADJUST="true"
+    fi
+    [ "$ADJUST" == "false" ]
+) && assert_test "tasks/00_host_prep.yml: Sysctl audit evaluates NEEDS_ADJUSTMENT=false when kernel limits already sufficient (Ubuntu)" 0 || \
+   assert_test "tasks/00_host_prep.yml: Sysctl audit evaluates NEEDS_ADJUSTMENT=false when kernel limits already sufficient (Ubuntu)" 1
+
+# Regression Test: tasks/00_host_prep.yml sysctl audit logic evaluates NEEDS_ADJUSTMENT=true when kernel limits are lower than required
+(
+    MOCK_SYSCTL_LOW_DIR="${MOCK_TMP_DIR}/mock_sysctl_low"
+    mkdir -p "$MOCK_SYSCTL_LOW_DIR"
+    cat << 'EOF' > "${MOCK_SYSCTL_LOW_DIR}/sysctl"
+#!/bin/sh
+case "$2" in
+    fs.file-max) echo "1048576" ;;
+    fs.nr_open) echo "1048576" ;;
+    vm.max_map_count) echo "65530" ;;
+    fs.inotify.max_user_watches) echo "8192" ;;
+    *) echo "0" ;;
+esac
+EOF
+    chmod +x "${MOCK_SYSCTL_LOW_DIR}/sysctl"
+    PATH="${MOCK_SYSCTL_LOW_DIR}:${PATH}"
+
+    FILE_MAX=$(sysctl -n fs.file-max 2>/dev/null || echo "0")
+    NR_OPEN=$(sysctl -n fs.nr_open 2>/dev/null || echo "0")
+    VM_MAX=$(sysctl -n vm.max_map_count 2>/dev/null || echo "0")
+    INOTIFY_WATCH=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo "0")
+    REQ_FILE_MAX=2097152
+    REQ_NR_OPEN=2097152
+    ADJUST="false"
+    if [ "$FILE_MAX" -lt "$REQ_FILE_MAX" ] || [ "$NR_OPEN" -lt "$REQ_NR_OPEN" ] || \
+       [ "$VM_MAX" -lt 262144 ] || [ "$INOTIFY_WATCH" -lt 524288 ]; then
+      ADJUST="true"
+    fi
+    [ "$ADJUST" == "true" ]
+) && assert_test "tasks/00_host_prep.yml: Sysctl audit evaluates NEEDS_ADJUSTMENT=true when kernel limits are lower than required" 0 || \
+   assert_test "tasks/00_host_prep.yml: Sysctl audit evaluates NEEDS_ADJUSTMENT=true when kernel limits are lower than required" 1
 
 # Regression Test: tasks/01_minikube_gvisor.yml uses uncompressed tar archive transfer (regular file over scp)
 if grep -q "minikube cp .*minikube:/tmp/gvisor_raw.tar" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
