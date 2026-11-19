@@ -1,0 +1,126 @@
+---
+- name: "[4/8] Reconcile NGINX Ingress Controller addon"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! kubectl -n ingress-nginx get deployment ingress-nginx-controller >/dev/null 2>&1; then
+      minikube addons disable ingress >/dev/null 2>&1 || true
+      minikube addons enable ingress
+    fi
+    for i in $(seq 1 30); do
+      kubectl -n ingress-nginx get deployment ingress-nginx-controller >/dev/null 2>&1 && break
+      sleep 2
+    done
+    kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [ingress, k8s-stack]
+
+- name: "[5/8] Reconcile Observability Stack (kube-prometheus-stack & 3 Grafana Dashboards)"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    K8S_DIR="{{ playbook_dir }}/../.."
+    STATUS=$(helm status monitoring -n monitoring 2>/dev/null | awk '/^STATUS:/{print $2}' || echo "")
+    if [ "$STATUS" != "deployed" ] || \
+       ! kubectl -n monitoring get deployment monitoring-grafana >/dev/null 2>&1 || \
+       [ "{{ force_helm_upgrade | bool | lower }}" = "true" ]; then
+      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+      helm repo update prometheus-community >/dev/null
+      helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+        -n monitoring --create-namespace \
+        -f "${K8S_DIR}/monitoring/values-prometheus-grafana.yaml" \
+        --wait --timeout=5m
+    fi
+    kubectl apply -f "${K8S_DIR}/monitoring/monitoring-ingress.yaml" \
+                  -f "${K8S_DIR}/monitoring/grafana-dashboard-agent-sandbox.yaml" \
+                  -f "${K8S_DIR}/monitoring/grafana-dashboard-sandbox-http-responses.yaml" \
+                  -f "${K8S_DIR}/monitoring/grafana-dashboard-testkube.yaml" >/dev/null
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [monitoring, k8s-stack]
+
+- name: "[6/8] Reconcile mogenius Agent Sandbox, Warm Pool, Router & Latency Exporter"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    K8S_DIR="{{ playbook_dir }}/../.."
+    STATUS=$(helm status agent-sandbox -n agent-sandbox-system 2>/dev/null | awk '/^STATUS:/{print $2}' || echo "")
+    if [ "$STATUS" != "deployed" ] || \
+       ! kubectl -n agent-sandbox get sandboxwarmpool default >/dev/null 2>&1 || \
+       [ "{{ force_helm_upgrade | bool | lower }}" = "true" ]; then
+      helm repo add mogenius https://helm.mogenius.com/public >/dev/null 2>&1 || true
+      helm repo update mogenius >/dev/null
+      helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+        --version {{ mogenius_chart_version }} \
+        -n agent-sandbox-system --create-namespace \
+        -f "${K8S_DIR}/helm/values-mogenius.yaml" \
+        --wait --timeout=3m
+    fi
+    kubectl apply -f "${K8S_DIR}/ingress/sandbox-router.yaml" \
+                  -f "${K8S_DIR}/ingress/sandbox-ingress.yaml" \
+                  -f "${K8S_DIR}/monitoring/agent-sandbox-servicemonitor.yaml" \
+                  -f "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" >/dev/null
+    kubectl -n agent-sandbox-system rollout status deployment/sandbox-router --timeout=180s
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [agent-sandbox, k8s-stack]
+
+- name: "[7/8] Reconcile Zero-Trust Out-of-Sandbox Egress & Credential Broker"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    K8S_DIR="{{ playbook_dir }}/../.."
+    kubectl apply -f "${K8S_DIR}/threat-model/egress-broker.yaml" >/dev/null
+    kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=180s
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [egress-broker, k8s-stack]
+
+- name: "[8/8] Reconcile Testkube OSS on '{{ minikube_worker_node }}', RBAC & TestWorkflows"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    K8S_DIR="{{ playbook_dir }}/../.."
+    STATUS=$(helm status testkube -n testkube 2>/dev/null | awk '/^STATUS:/{print $2}' || echo "")
+    API_READY=$(kubectl -n testkube get deployment testkube-api-server -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    MONGO_READY=$(kubectl -n testkube get deployment testkube-mongodb -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    if [ "$STATUS" != "deployed" ] || [ "${API_READY:-0}" -lt 1 ] || [ "${MONGO_READY:-0}" -lt 1 ] || \
+       [ "{{ force_helm_upgrade | bool | lower }}" = "true" ]; then
+      helm repo add kubeshop https://kubeshop.github.io/helm-charts >/dev/null 2>&1 || true
+      helm repo update kubeshop >/dev/null
+      helm upgrade --install testkube kubeshop/testkube \
+        --version {{ testkube_chart_version }} \
+        -n testkube --create-namespace \
+        -f "${K8S_DIR}/testkube/values-testkube.yaml" \
+        --wait --timeout=5m
+    fi
+    kubectl apply -f "${K8S_DIR}/testkube/rbac.yaml" >/dev/null
+    while IFS= read -r wf; do
+      [ -n "$wf" ] && kubectl apply -f "$wf" >/dev/null
+    done < <(find "${K8S_DIR}/testkube" -maxdepth 1 -name "test-workflow*.yaml" | sort)
+    kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=180s
+    kubectl -n testkube rollout status deployment/testkube-api-server --timeout=180s
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [testkube, k8s-stack]
+
+- name: "[Verify] Assert all 11 core service endpoints have active backends"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {% for item in core_service_endpoints %}
+    IPS=$(kubectl -n "{{ item.ns }}" get endpointslices -l "kubernetes.io/service-name={{ item.svc }}" -o jsonpath="{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}" 2>/dev/null || echo "")
+    [ -n "$IPS" ] || IPS=$(kubectl -n "{{ item.ns }}" get endpoints "{{ item.svc }}" -o jsonpath="{.subsets[*].addresses[*].ip}" 2>/dev/null || echo "")
+    if [ -z "$IPS" ]; then
+      echo "ERROR: [{{ item.ns }}] {{ item.svc }} has no ready endpoints!" >&2
+      exit 1
+    fi
+    echo "OK: [{{ item.ns }}] {{ item.svc }} -> ($IPS)"
+    {% endfor %}
+    kubectl wait --for=condition=Ready node/minikube node/{{ minikube_worker_node }} --timeout=60s >/dev/null
+  args:
+    executable: /bin/bash
+  register: endpoint_verification
+  changed_when: false
+  when: not (dry_run_mode | bool)
+  tags: [verify]

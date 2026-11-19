@@ -1,0 +1,43 @@
+---
+# Cluster Sizing & Runtime Configuration
+minikube_cpus: 4
+minikube_memory_mb: 8192
+minikube_custom_memory_mb: ""
+minikube_ci_mode: false
+minikube_driver: docker
+minikube_container_runtime: containerd
+minikube_worker_node: minikube-m02
+
+# Execution Modes
+force_helm_upgrade: false
+dry_run_mode: false
+
+# Optional Linux VM Headless & Kernel Optimizations
+configure_linux_sysctl: true
+headless_vm_optimize: false
+
+# Chart & Tool Versions
+mogenius_chart_version: "1.2.1"
+testkube_chart_version: "2.14.2"
+k8s_fallback_version: "v1.31.0"
+
+# Kernel sysctl parameters for multi-node Kubernetes + Prometheus + gVisor
+k8s_sysctl_params:
+  fs.inotify.max_user_watches: 524288
+  fs.inotify.max_user_instances: 512
+  vm.max_map_count: 262144
+  net.ipv4.ip_forward: 1
+
+# 11 Core Service Endpoints to verify at the end of reconciliation
+core_service_endpoints:
+  - { ns: "ingress-nginx", svc: "ingress-nginx-controller" }
+  - { ns: "agent-sandbox-system", svc: "agent-sandbox-controller" }
+  - { ns: "agent-sandbox-system", svc: "sandbox-router" }
+  - { ns: "agent-sandbox-system", svc: "sandbox-latency-exporter" }
+  - { ns: "sandbox-egress-system", svc: "egress-broker" }
+  - { ns: "monitoring", svc: "monitoring-grafana" }
+  - { ns: "monitoring", svc: "monitoring-kube-prometheus-prometheus" }
+  - { ns: "testkube", svc: "testkube-api-server" }
+  - { ns: "testkube", svc: "testkube-mongodb" }
+  - { ns: "testkube", svc: "testkube-nats" }
+  - { ns: "testkube", svc: "testkube-minio-service-testkube" }

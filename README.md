@@ -35,8 +35,14 @@ This repository contains the end-to-end reference architectures, deployment mani
 │   └── cleanup.sh                       # Teardown script for AWS SAM stacks & MicroVMs
 │
 ├── k8s-agent-sandbox/                   # Kubernetes Agent Sandbox (mogenius + Google gVisor)
+│   ├── ansible/                         # Declarative ansible-core automation stack (zero pip/galaxy deps)
+│   │   ├── ansible.cfg                  # Sandboxed /tmp execution config (local_tmp/remote_tmp)
+│   │   ├── inventory.ini                # Localhost & remote VM inventory
+│   │   ├── group_vars/all.yml           # Cluster sizing, chart versions & sysctl params
+│   │   ├── playbooks/site.yml           # Unified multi-stage playbook
+│   │   └── tasks/                       # Modular tasks: 00_host_prep, 01_minikube_gvisor, 02_k8s_stack
 │   ├── scripts/
-│   │   ├── bootstrap_cluster.sh         # 8-stage idempotent cluster reconciler & self-healing bootstrapper
+│   │   ├── bootstrap_cluster.sh         # Thin CLI wrapper delegating to ansible-core (--dry-run vs --preflight-only)
 │   │   └── test_multios_bootstrap.sh    # Multi-OS & multi-arch integration test suite (sources reconciler)
 │   ├── helm/
 │   │   └── values-mogenius.yaml         # Helm values enabling gVisor RuntimeClass & NetworkPolicies
@@ -107,7 +113,7 @@ Running a production-grade 2-node Kubernetes cluster locally (`minikube` control
 * **CPU Architectures:** Both **`aarch64` (ARM64)** and **`x86_64` (AMD64)** are fully supported with multi-architecture OCI manifests and dynamic gVisor (`runsc`) package resolution.
 * **Detailed Setup:** For operating system and architecture-specific installation instructions, see the **[Multi-OS & Multi-Architecture Setup Guide](docs/MULTI_OS_SETUP_GUIDE.md)**.
 
-**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, and `helm`. The `testkube` CLI is automatically installed by `bootstrap_cluster.sh` (via Homebrew on macOS, or the official Linux installer on Linux/WSL2) if missing.
+**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, `helm`, and `ansible-core` (built-in system Python 3, zero external `pip` packages or Galaxy collections required). The `ansible-core` and `testkube` CLIs are automatically verified and installed by `bootstrap_cluster.sh` via native package managers (`brew`, `apt`, `dnf`) if missing.
 
 > [!IMPORTANT]
 > **Resource Sizing (macOS Docker Desktop / Linux / Windows WSL 2):**
@@ -229,7 +235,10 @@ kubectl apply -f k8s-agent-sandbox/testkube/rbac.yaml \
 
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
-1. **Provision or Self-Heal the Full 2-Node Cluster:** Run `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` (works from a fresh `minikube delete` or after a laptop sleep/reboot, reconciling all 8 layers including `minikube-m02`, `gVisor`, Prometheus/Grafana, `egress-broker`, and Testkube OSS).
+1. **Audit or Provision the Full 2-Node Cluster via Ansible:**
+   - **Read-Only Dry Run (Zero Changes):** Run `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
+   - **Host Toolchain Discovery:** Run `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` to ensure required host binaries are present and exit before cluster changes.
+   - **Full Cluster Reconciliation:** Run `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` (delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml` using pure `ansible.builtin.*` modules).
 2. **Run Continuous Red-Team Security & Benchmark Workflows via Testkube:**
    - `testkube run tw agent-sandbox-security-audit -f` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing)*
    - `testkube run tw agent-sandbox-benchmark -f` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark with scale-to-zero)*

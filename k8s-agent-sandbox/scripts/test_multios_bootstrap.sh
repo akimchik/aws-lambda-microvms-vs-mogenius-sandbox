@@ -248,10 +248,24 @@ fi
 ) && assert_test "parse_args(): Accepts --ci" 0 || assert_test "parse_args(): Accepts --ci" 1
 
 (
-    PREFLIGHT_ONLY=false
+    PREFLIGHT_ONLY=false; DRY_RUN=false
     parse_args --preflight-only
-    [ "$PREFLIGHT_ONLY" = true ]
-) && assert_test "parse_args(): Accepts --preflight-only" 0 || assert_test "parse_args(): Accepts --preflight-only" 1
+    [ "$PREFLIGHT_ONLY" = true ] && [ "$DRY_RUN" = false ]
+) && assert_test "parse_args(): --preflight-only is distinct from --dry-run" 0 || \
+   assert_test "parse_args(): --preflight-only is distinct from --dry-run" 1
+
+(
+    PREFLIGHT_ONLY=false; DRY_RUN=false
+    parse_args --dry-run
+    [ "$DRY_RUN" = true ] && [ "$PREFLIGHT_ONLY" = false ]
+) && assert_test "parse_args(): --dry-run sets DRY_RUN=true without PREFLIGHT_ONLY" 0 || \
+   assert_test "parse_args(): --dry-run sets DRY_RUN=true without PREFLIGHT_ONLY" 1
+
+if "${K8S_DIR}/scripts/bootstrap_cluster.sh" --dry-run 2>&1 | grep -q "Dry-Run Audit Complete (--dry-run: Zero changes made)!"; then
+    assert_test "bootstrap_cluster.sh --dry-run: Executes read-only audit with zero mutations" 0
+else
+    assert_test "bootstrap_cluster.sh --dry-run: Executes read-only audit with zero mutations" 1
+fi
 
 (
     FORCE_HELM=false
@@ -462,6 +476,11 @@ REQUIRED_MANIFESTS=(
     "${K8S_DIR}/testkube/test-workflow.yaml"
     "${K8S_DIR}/testkube/test-workflow-security.yaml"
     "${K8S_DIR}/testkube/test-workflow-sustained-load.yaml"
+    "${K8S_DIR}/ansible/group_vars/all.yml"
+    "${K8S_DIR}/ansible/playbooks/site.yml"
+    "${K8S_DIR}/ansible/tasks/00_host_prep.yml"
+    "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml"
+    "${K8S_DIR}/ansible/tasks/02_k8s_stack.yml"
 )
 
 # Identify available real YAML parser (Ruby with Psych or Python with PyYAML)

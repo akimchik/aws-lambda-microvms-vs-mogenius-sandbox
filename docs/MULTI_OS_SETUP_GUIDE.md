@@ -46,12 +46,19 @@ Do **NOT** use default Docker Desktop settings (4 GB RAM / 2 CPUs), or Grafana a
 
 ### B. Tooling Installation via Homebrew
 ```bash
-# Install Minikube, Kubectl, Helm, and Testkube CLI
-brew install minikube kubectl helm kubeshop/testkube/testkube
+# Install Minikube, Kubectl, Helm, Ansible, and Testkube CLI
+brew install minikube kubectl helm ansible kubeshop/testkube/testkube
 ```
 
-### C. Launch Cluster
+### C. Launch Cluster or Run Read-Only Dry-Run Audit
 ```bash
+# 1. Non-mutating read-only audit (ansible-playbook --check --diff, 0 changes)
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+
+# 2. Host toolchain discovery & preflight check only
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+
+# 3. Full declarative cluster reconciliation via Ansible
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 ```
 
@@ -146,10 +153,21 @@ curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 |
 
 # 4. Testkube CLI (Official Linux installer)
 curl -sSLf https://get.testkube.io | bash
+
+# 5. Ansible Core (auto-installed by bootstrap script if missing)
+# Ubuntu/Debian: sudo apt-get install -y ansible-core
+# RHEL/Rocky/Fedora: sudo dnf install -y ansible-core
 ```
 
-### D. Launch Cluster
+### D. Launch Cluster or Run Read-Only Dry-Run Audit
 ```bash
+# Non-mutating read-only audit (0 changes made)
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+
+# Host toolchain discovery & preflight check only
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+
+# Full declarative cluster reconciliation
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 ```
 
@@ -360,6 +378,9 @@ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
 # Testkube CLI
 curl -sSLf https://get.testkube.io | bash
+
+# Ansible Core (or auto-installed by bootstrap script)
+sudo apt-get install -y ansible-core
 ```
 
 ### Step 6: Clone and Bootstrap

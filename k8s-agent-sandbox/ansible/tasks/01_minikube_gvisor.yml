@@ -1,0 +1,128 @@
+---
+- name: "[1/8] Query Docker daemon memory ceiling (MemTotal)"
+  ansible.builtin.command: docker info --format '{{ "{{" }}.MemTotal{{ "}}" }}'
+  register: docker_mem_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always, preflight, minikube]
+
+- name: "[1/8] Compute effective memory ceiling and auto-clamp if < 8192 MB"
+  ansible.builtin.set_fact:
+    detected_mem_mb: >-
+      {{
+        ((docker_mem_raw.stdout | trim | int) // 1048576)
+        if (docker_mem_raw.rc == 0 and (docker_mem_raw.stdout | trim | int) > 0)
+        else (ansible_facts['memtotal_mb'] | default(8192) | int)
+      }}
+  tags: [always, preflight, minikube]
+
+- name: "[1/8] Determine final Minikube primary node CPUs and Memory (MB)"
+  ansible.builtin.set_fact:
+    effective_cpus: "{{ 2 if (minikube_ci_mode | bool) else (minikube_cpus | int) }}"
+    effective_memory_mb: >-
+      {{
+        (minikube_custom_memory_mb | int) if ((minikube_custom_memory_mb | string | length) > 0)
+        else (
+          4096 if (minikube_ci_mode | bool)
+          else (
+            ([3072, [(detected_mem_mb | int) - 1200, 6144] | min] | max)
+            if ((detected_mem_mb | int) < 8192)
+            else (minikube_memory_mb | int)
+          )
+        )
+      }}
+  tags: [always, preflight, minikube]
+
+- name: "[1/8] Report computed Minikube sizing"
+  ansible.builtin.debug:
+    msg: "Docker/Host Memory Ceiling={{ detected_mem_mb }} MB -> Target Minikube Sizing: {{ effective_cpus }} vCPUs, {{ effective_memory_mb }} MB RAM"
+  tags: [always, preflight, minikube]
+
+- name: "[1/8] Ensure Minikube primary node and dedicated worker '{{ minikube_worker_node }}' are running and tainted"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! minikube status >/dev/null 2>&1; then
+      minikube start --driver={{ minikube_driver }} --container-runtime={{ minikube_container_runtime }} --cpus={{ effective_cpus }} --memory={{ effective_memory_mb }}
+    fi
+    if ! kubectl get node {{ minikube_worker_node }} >/dev/null 2>&1; then
+      minikube node add --worker=true
+    fi
+    kubectl label node {{ minikube_worker_node }} dedicated=testkube node-role.kubernetes.io/worker=testkube --overwrite >/dev/null
+    kubectl taint node {{ minikube_worker_node }} dedicated=testkube:NoSchedule --overwrite >/dev/null 2>&1 || true
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [minikube]
+
+- name: "[2/8] Verify CoreDNS health, disable legacy gVisor addon, and map control-plane.minikube.internal"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl -n kube-system get deployment coredns >/dev/null
+    minikube addons disable gvisor 2>/dev/null || true
+    CP_IP=$(minikube ip)
+    minikube ssh "grep -q 'control-plane.minikube.internal' /etc/hosts || echo '${CP_IP} control-plane.minikube.internal' | sudo tee -a /etc/hosts >/dev/null"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not (dry_run_mode | bool)
+  tags: [minikube, gvisor]
+
+- name: "[3/8] Reconcile native Google gVisor (runsc), deduplicate containerd config.toml, and register RuntimeClass"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    minikube ssh '
+    set -euo pipefail
+    sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
+    if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
+      NODE_ARCH=$(uname -m)
+      case "$NODE_ARCH" in
+        x86_64|amd64) GVISOR_ARCH="x86_64" ;;
+        aarch64|arm64) GVISOR_ARCH="aarch64" ;;
+        *) GVISOR_ARCH="$NODE_ARCH" ;;
+      esac
+      URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
+      curl -fsSL --retry 3 "${URL}/gvisor.tar.bz2" -o /tmp/gvisor.tar.bz2
+      tar -xjf /tmp/gvisor.tar.bz2 -C /tmp/
+      chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
+      sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
+      rm -f /tmp/gvisor.tar.bz2
+    fi
+    CONFIG_PATH="/etc/containerd/config.toml"
+    if [ ! -f "$CONFIG_PATH" ]; then
+      sudo mkdir -p /etc/containerd
+      containerd config default | sudo tee "$CONFIG_PATH" >/dev/null
+    fi
+    awk '\''
+    BEGIN { in_dup = 0; seen = 0; }
+    index($0, "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]") == 1 {
+      seen = seen + 1;
+      if (seen > 1) { in_dup = 1; next; }
+      print; next;
+    }
+    index($0, "[") == 1 { in_dup = 0; }
+    { if (in_dup) { next; } print; }
+    END {
+      if (seen == 0) {
+        printf "\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]\n  runtime_type = \"io.containerd.runsc.v1\"\n";
+      }
+    }
+    '\'' "$CONFIG_PATH" > /tmp/config.toml.clean
+    if ! cmp -s "$CONFIG_PATH" /tmp/config.toml.clean; then
+      sudo mv /tmp/config.toml.clean "$CONFIG_PATH"
+      sudo systemctl restart containerd
+    else
+      rm -f /tmp/config.toml.clean
+    fi
+    '
+    cat <<EOF | kubectl apply -f - >/dev/null
+    apiVersion: node.k8s.io/v1
+    kind: RuntimeClass
+    metadata:
+      name: gvisor
+    handler: runsc
+    EOF
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [gvisor]

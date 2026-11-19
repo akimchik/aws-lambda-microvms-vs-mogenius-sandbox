@@ -13,10 +13,16 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 
 ## 📋 Zero-to-Hero Provisioning & Self-Healing Bootstrapper
 
-Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run my 8-stage idempotent reconciler:
+Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run the Ansible bootstrapper:
 
 ```bash
-# Reconcile all 8 architecture layers (or pass --upgrade-helm to force Helm chart upgrades)
+# 1. Non-mutating read-only audit (runs ansible-playbook --check --diff, 0 changes made)
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+
+# 2. Host toolchain discovery & preflight setup only ([0/8])
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+
+# 3. Full 8-stage declarative cluster reconciliation via Ansible
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 
 # Or pass custom memory on 8 GB hosts/VMs to prevent RSRC_OVER_ALLOC_MEM:
@@ -24,7 +30,7 @@ Whether starting from a completely wiped environment (`minikube delete`) or waki
 # (Recommended: expand VM memory to 10 GB on host: VBoxManage modifyvm "<VM_NAME>" --memory 10240)
 ```
 
-What `bootstrap_cluster.sh` automatically checks and converges against the codebase:
+The thin `bootstrap_cluster.sh` CLI wrapper delegates all 8 reconciliation layers to `k8s-agent-sandbox/ansible/playbooks/site.yml` (using zero-pip `ansible.builtin.*` modules):
 1. **Multi-Node Topology (`minikube` + `minikube-m02`):** Starts the control-plane node, adds the dedicated worker node `minikube-m02` if missing, and applies the `dedicated=testkube:NoSchedule` taint and labels.
 2. **Host Resolution & Addon Cleanup:** Maps `control-plane.minikube.internal` in `/etc/hosts` and disables the legacy `gvisor` addon.
 3. **Native gVisor (`runsc`) Runtime:** Installs the official Google `runsc` binary inside the node if missing, deduplicates `/etc/containerd/config.toml`, restarts `containerd`, and registers `RuntimeClass: gvisor`.
