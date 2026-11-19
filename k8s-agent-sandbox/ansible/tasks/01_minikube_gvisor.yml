@@ -19,16 +19,16 @@
 
 - name: "[1/8] Determine final Minikube primary node CPUs and Memory (MB)"
   ansible.builtin.set_fact:
-    effective_cpus: "{{ 2 if (minikube_ci_mode | bool) else (minikube_cpus | int) }}"
+    effective_cpus: "{{ 2 if (minikube_ci_mode | default(false) | bool) else (minikube_cpus | default(4) | int) }}"
     effective_memory_mb: >-
       {{
-        (minikube_custom_memory_mb | int) if ((minikube_custom_memory_mb | string | length) > 0)
+        (minikube_custom_memory_mb | int) if ((minikube_custom_memory_mb | default('') | string | length) > 0)
         else (
-          4096 if (minikube_ci_mode | bool)
+          4096 if (minikube_ci_mode | default(false) | bool)
           else (
-            ([3072, [(detected_mem_mb | int) - 1200, 6144] | min] | max)
-            if ((detected_mem_mb | int) < 8192)
-            else (minikube_memory_mb | int)
+            ([3072, [(detected_mem_mb | default(8192) | int) - 1200, 6144] | min] | max)
+            if ((detected_mem_mb | default(8192) | int) < 8192)
+            else (minikube_memory_mb | default(8192) | int)
           )
         )
       }}

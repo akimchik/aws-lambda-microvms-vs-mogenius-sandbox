@@ -85,6 +85,26 @@ for script in "${SCRIPTS_TO_TEST[@]}"; do
     fi
 done
 
+# Check embedded bash scripts inside Ansible tasks (00_host_prep, 01_minikube_gvisor, 02_k8s_stack)
+if command -v ruby >/dev/null 2>&1; then
+    EMBEDDED_SYNTAX_STATUS=$(ruby -ryaml -e '
+    all_ok = true
+    Dir.glob("'"${K8S_DIR}"'/ansible/tasks/*.yml").sort.each do |f|
+      tasks = YAML.load_file(f) rescue []
+      tasks.each do |t|
+        next unless t.is_a?(Hash)
+        sh = t["ansible.builtin.shell"] || t["shell"]
+        next unless sh
+        sanitized = sh.gsub(/\{\{.*?\}\}/, "dummy").gsub(/\{%.*?%\}/, "")
+        IO.popen(["bash", "-n"], "w") { |pipe| pipe.write(sanitized) }
+        all_ok = false unless $?.success?
+      end
+    end
+    exit(all_ok ? 0 : 1)
+    ' 2>/dev/null && echo "0" || echo "1")
+    assert_test "Embedded Bash syntax check in all Ansible tasks/*.yml" "$EMBEDDED_SYNTAX_STATUS"
+fi
+
 # Python AST syntax on ALL python files in repository
 PY_BIN=""
 for candidate in /usr/bin/python3 python3; do
@@ -765,6 +785,81 @@ if grep -q "gvisor-verification-probe" "${K8S_DIR}/ansible/tasks/02_k8s_stack.ym
     assert_test "tasks/02_k8s_stack.yml: Verification requires live gVisor probe and WarmPool ready" 0
 else
     assert_test "tasks/02_k8s_stack.yml: Verification requires live gVisor probe and WarmPool ready" 1
+fi
+
+# Regression Test: tasks/*.yml contains zero empty array expansions (${arr[@]} on arr=()) under set -u (macOS bash 3.2 bug)
+if command -v ruby >/dev/null 2>&1; then
+    EMPTY_ARR_STATUS=$(ruby -e '
+    bad = false
+    Dir.glob("'"${K8S_DIR}"'/ansible/tasks/*.yml").sort.each do |f|
+      c = File.read(f)
+      if c =~ /=\(\)\s*.*?\"?\$\{\w+\[@\]\}\"?/m
+        bad = true
+      end
+    end
+    exit(bad ? 1 : 0)
+    ' 2>/dev/null && echo "0" || echo "1")
+    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" "$EMPTY_ARR_STATUS"
+fi
+
+# Regression Test: task [6/8] mogenius helm upgrade executes cleanly in /bin/bash set -euo pipefail (both latest & pinned version)
+/bin/bash -c '
+set -euo pipefail
+test_mogenius_helm() {
+    local chart_ver="$1"
+    local extra_helm_arg=""
+    [ "$chart_ver" != "latest" ] && [ -n "$chart_ver" ] && extra_helm_arg="--version $chart_ver"
+    mock_helm() { return 0; }
+    mock_helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+      ${extra_helm_arg} \
+      -n agent-sandbox-system --create-namespace
+}
+test_mogenius_helm "latest"
+test_mogenius_helm "1.2.1"
+' >/dev/null 2>&1 && assert_test "tasks/02_k8s_stack.yml: [6/8] mogenius helm upgrade executes without unbound variable under /bin/bash set -euo pipefail" 0 || \
+assert_test "tasks/02_k8s_stack.yml: [6/8] mogenius helm upgrade executes without unbound variable under /bin/bash set -euo pipefail" 1
+
+# Regression Test: task [8/8] testkube helm upgrade executes cleanly in /bin/bash set -euo pipefail (both latest & pinned version)
+/bin/bash -c '
+set -euo pipefail
+test_testkube_helm() {
+    local tk_chart_ver="$1"
+    local tk_extra_arg=""
+    [ "$tk_chart_ver" != "latest" ] && [ -n "$tk_chart_ver" ] && tk_extra_arg="--version $tk_chart_ver"
+    mock_helm() { return 0; }
+    mock_helm upgrade --install testkube kubeshop/testkube \
+      ${tk_extra_arg} \
+      -n testkube --create-namespace
+}
+test_testkube_helm "latest"
+test_testkube_helm "2.14.2"
+' >/dev/null 2>&1 && assert_test "tasks/02_k8s_stack.yml: [8/8] testkube helm upgrade executes without unbound variable under /bin/bash set -euo pipefail" 0 || \
+assert_test "tasks/02_k8s_stack.yml: [8/8] testkube helm upgrade executes without unbound variable under /bin/bash set -euo pipefail" 1
+
+# Regression Test: task [Verify] warm pool wait target executes cleanly in /bin/bash set -euo pipefail (both empty & defined selector)
+/bin/bash -c '
+set -euo pipefail
+test_warmpool_wait() {
+    local selector="$1"
+    local filter_arg=""
+    [ -n "$selector" ] && filter_arg="-l $selector"
+    local wait_target="pod ${filter_arg}"
+    [ -z "$filter_arg" ] && wait_target="pod --all"
+    mock_kubectl() { return 0; }
+    mock_kubectl wait --for=condition=Ready ${wait_target} --timeout=90s
+}
+test_warmpool_wait ""
+test_warmpool_wait "app=mogenius"
+' >/dev/null 2>&1 && assert_test "tasks/02_k8s_stack.yml: [Verify] warm pool wait target executes without unbound variable under /bin/bash set -euo pipefail" 0 || \
+assert_test "tasks/02_k8s_stack.yml: [Verify] warm pool wait target executes without unbound variable under /bin/bash set -euo pipefail" 1
+
+# Regression Test: tasks/01_minikube_gvisor.yml sizing facts declare defensive defaults
+if grep -q "minikube_ci_mode | default" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+   grep -q "minikube_cpus | default" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+   grep -q "minikube_memory_mb | default" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml"; then
+    assert_test "tasks/01_minikube_gvisor.yml: sizing variables declare defensive defaults for isolated tag execution" 0
+else
+    assert_test "tasks/01_minikube_gvisor.yml: sizing variables declare defensive defaults for isolated tag execution" 1
 fi
 
 # ==============================================================================
