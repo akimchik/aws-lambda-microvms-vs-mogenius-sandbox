@@ -50,8 +50,11 @@
        [ "{{ force_helm_upgrade | bool | lower }}" = "true" ]; then
       helm repo add mogenius https://helm.mogenius.com/public >/dev/null 2>&1 || true
       helm repo update mogenius >/dev/null
+      CHART_VER="{{ mogenius_chart_version | default('latest') }}"
+      VER_ARG=()
+      [ "$CHART_VER" != "latest" ] && [ -n "$CHART_VER" ] && VER_ARG=(--version "$CHART_VER")
       helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
-        --version {{ mogenius_chart_version }} \
+        "${VER_ARG[@]}" \
         -n agent-sandbox-system --create-namespace \
         -f "${K8S_DIR}/helm/values-mogenius.yaml" \
         --wait --timeout=3m
@@ -88,8 +91,11 @@
        [ "{{ force_helm_upgrade | bool | lower }}" = "true" ]; then
       helm repo add kubeshop https://kubeshop.github.io/helm-charts >/dev/null 2>&1 || true
       helm repo update kubeshop >/dev/null
+      TK_CHART_VER="{{ testkube_chart_version | default('latest') }}"
+      TK_VER_ARG=()
+      [ "$TK_CHART_VER" != "latest" ] && [ -n "$TK_CHART_VER" ] && TK_VER_ARG=(--version "$TK_CHART_VER")
       helm upgrade --install testkube kubeshop/testkube \
-        --version {{ testkube_chart_version }} \
+        "${TK_VER_ARG[@]}" \
         -n testkube --create-namespace \
         -f "${K8S_DIR}/testkube/values-testkube.yaml" \
         --wait --timeout=5m
@@ -137,13 +143,37 @@
 - name: "[Verify] Assert mogenius SandboxWarmPool pods are running and ready"
   ansible.builtin.shell: |
     set -euo pipefail
+    SELECTOR=$(kubectl -n agent-sandbox get sandboxwarmpool default -o jsonpath='{.status.selector}' 2>/dev/null || echo "")
+    FILTER=()
+    [ -n "$SELECTOR" ] && FILTER=(-l "$SELECTOR")
+
+    # Wait up to 60s for warm pool standby pod(s) to be created
     for i in $(seq 1 30); do
-      if kubectl -n agent-sandbox get pods -l "sandboxwarmpool=default" 2>/dev/null | grep -q "Running"; then
+      PODS=$(kubectl -n agent-sandbox get pods "${FILTER[@]}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+      if [ -n "$PODS" ]; then
         break
+      fi
+      if [ -z "$SELECTOR" ]; then
+        SELECTOR=$(kubectl -n agent-sandbox get sandboxwarmpool default -o jsonpath='{.status.selector}' 2>/dev/null || echo "")
+        [ -n "$SELECTOR" ] && FILTER=(-l "$SELECTOR")
       fi
       sleep 2
     done
-    kubectl -n agent-sandbox wait --for=condition=Ready pod -l "sandboxwarmpool=default" --timeout=90s >/dev/null
+
+    PODS=$(kubectl -n agent-sandbox get pods "${FILTER[@]}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    if [ -z "$PODS" ]; then
+      echo "=== Error: No SandboxWarmPool pods found in agent-sandbox ===" >&2
+      kubectl -n agent-sandbox get sandboxwarmpools,pods -o wide >&2
+      exit 1
+    fi
+
+    # Wait for the warm pool pod(s) to reach Ready condition
+    if ! kubectl -n agent-sandbox wait --for=condition=Ready pod "${FILTER[@]}" --timeout=90s >/dev/null; then
+      echo "=== Warm Pool Pod Failed to Reach Ready ===" >&2
+      kubectl -n agent-sandbox get pods "${FILTER[@]}" -o wide >&2
+      kubectl -n agent-sandbox describe pods "${FILTER[@]}" >&2
+      exit 1
+    fi
   args:
     executable: /bin/bash
   changed_when: false

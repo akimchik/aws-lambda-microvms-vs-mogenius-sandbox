@@ -461,7 +461,7 @@ fi
 
 # Regression Test: tasks/02_k8s_stack.yml tests live gVisor pod creation & SandboxWarmPool
 if grep -q "gvisor-verification-probe" "${K8S_DIR}/ansible/tasks/02_k8s_stack.yml" && \
-   grep -q "sandboxwarmpool=default" "${K8S_DIR}/ansible/tasks/02_k8s_stack.yml"; then
+   grep -q "sandboxwarmpool default" "${K8S_DIR}/ansible/tasks/02_k8s_stack.yml"; then
     assert_test "tasks/02_k8s_stack.yml: Verification requires live gVisor probe and WarmPool ready" 0
 else
     assert_test "tasks/02_k8s_stack.yml: Verification requires live gVisor probe and WarmPool ready" 1

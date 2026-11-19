@@ -138,11 +138,18 @@
   tags: [preflight, host-prep]
 
 - name: "[0/8] Install multi-arch kubectl on Linux if missing"
-  ansible.builtin.get_url:
-    url: "https://dl.k8s.io/release/{{ k8s_fallback_version }}/bin/linux/{{ cli_arch }}/kubectl"
-    dest: /usr/local/bin/kubectl
-    mode: "0755"
+  ansible.builtin.shell: |
+    set -e
+    K8S_VER="{{ kubectl_version | default('latest') }}"
+    if [ "$K8S_VER" = "latest" ]; then
+      K8S_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo "{{ k8s_fallback_version }}")
+    fi
+    curl -fsSL "https://dl.k8s.io/release/${K8S_VER}/bin/linux/{{ cli_arch }}/kubectl" -o /usr/local/bin/kubectl
+    chmod 0755 /usr/local/bin/kubectl
+  args:
+    executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  changed_when: true
   when:
     - ansible_facts['system'] == 'Linux'
     - "'MISSING:kubectl' in cli_audit.stdout"
@@ -176,7 +183,17 @@
   ansible.builtin.shell: |
     set -e
     command -v helm >/dev/null 2>&1 || (curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash)
-    command -v testkube >/dev/null 2>&1 || (curl -sSLf https://get.testkube.io | bash)
+    if ! command -v testkube >/dev/null 2>&1; then
+      TK_VER="{{ testkube_cli_version | default('latest') }}"
+      if [ "$TK_VER" = "latest" ]; then
+        # Resolve latest tag via HTTP redirect header to bypass anonymous GitHub API rate limits
+        TK_VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/kubeshop/testkube/releases/latest 2>/dev/null | awk -F/ '{print $NF}' | tr -d 'v' || echo "")
+      fi
+      if [ -n "$TK_VER" ]; then
+        export TESTKUBE_VERSION="$TK_VER"
+      fi
+      curl -sSLf https://get.testkube.io | bash
+    fi
   args:
     executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
