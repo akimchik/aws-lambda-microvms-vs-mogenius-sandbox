@@ -285,6 +285,12 @@ fi
     [ "$FORCE_ASK_BECOME" = true ]
 ) && assert_test "parse_args(): Accepts --ask-become-pass" 0 || assert_test "parse_args(): Accepts --ask-become-pass" 1
 
+(
+    CONFIGURE_HOST_SYSCTL=false
+    parse_args --configure-host-sysctl
+    [ "$CONFIGURE_HOST_SYSCTL" = true ]
+) && assert_test "parse_args(): Accepts --configure-host-sysctl" 0 || assert_test "parse_args(): Accepts --configure-host-sysctl" 1
+
 # ==============================================================================
 # Sudo & Privilege Escalation Mode Detection Tests (Ubuntu vs Rocky vs macOS)
 # ==============================================================================
@@ -669,6 +675,44 @@ if ! awk '/ansible_facts..system.. == .Darwin./,/(tags:)/' "${K8S_DIR}/ansible/t
 else
     assert_test "tasks/00_host_prep.yml: Darwin tasks execute without become/sudo and require no host sysctl" 1
 fi
+
+# Regression Test: configure_linux_sysctl is true in group_vars/all.yml for Linux kernel optimizations
+if grep -q "configure_linux_sysctl: true" "${K8S_DIR}/ansible/group_vars/all.yml"; then
+    assert_test "group_vars/all.yml: configure_linux_sysctl is enabled for Linux kernel optimization" 0
+else
+    assert_test "group_vars/all.yml: configure_linux_sysctl is enabled for Linux kernel optimization" 1
+fi
+
+# Regression Test: tasks/00_host_prep.yml sysctl tasks include ignore_unreachable: true
+if grep -q "ignore_unreachable: true" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: Sysctl tasks specify ignore_unreachable: true" 0
+else
+    assert_test "tasks/00_host_prep.yml: Sysctl tasks specify ignore_unreachable: true" 1
+fi
+
+# Regression Test: ansible.cfg configures privilege_escalation and sudo_become_plugin
+if grep -q "\[privilege_escalation\]" "${K8S_DIR}/ansible/ansible.cfg" && \
+   grep -q "\[sudo_become_plugin\]" "${K8S_DIR}/ansible/ansible.cfg"; then
+    assert_test "ansible.cfg: Configures privilege_escalation and sudo_become_plugin" 0
+else
+    assert_test "ansible.cfg: Configures privilege_escalation and sudo_become_plugin" 1
+fi
+
+# Regression Test: ansible/plugins/become/sudo.py matches Ubuntu sudo-rs wrapped password prompt
+(
+    if [ -n "$PY_BIN" ]; then
+        "$PY_BIN" -c "
+import re
+prompt = '[sudo via ansible, key=ezkiwamgebwhwtabxxycfuuaqbuipeqi] password:'
+sudo_rs = re.compile(rf'\[sudo:\s+{re.escape(prompt)}\]\s+\S.+\Z'.encode())
+line = b'[sudo: [sudo via ansible, key=ezkiwamgebwhwtabxxycfuuaqbuipeqi] password:] Password:'
+assert bool(sudo_rs.match(line)), 'sudo-rs regex failed to match wrapped Ubuntu prompt'
+"
+    else
+        grep -q "sudo_rs = re.compile" "${K8S_DIR}/ansible/plugins/become/sudo.py"
+    fi
+) && assert_test "ansible/plugins/become/sudo.py: Matches Ubuntu sudo-rs wrapped prompt format" 0 || \
+   assert_test "ansible/plugins/become/sudo.py: Matches Ubuntu sudo-rs wrapped prompt format" 1
 
 # Regression Test: tasks/00_host_prep.yml sysctl audit logic evaluates NEEDS_ADJUSTMENT=false when kernel limits are already sufficient (Ubuntu)
 (

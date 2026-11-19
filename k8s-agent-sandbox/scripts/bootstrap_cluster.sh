@@ -26,6 +26,7 @@ PREFLIGHT_ONLY=false
 DRY_RUN=false
 CI_MODE=false
 FORCE_ASK_BECOME=false
+CONFIGURE_HOST_SYSCTL=false
 CUSTOM_MEM="${MINIKUBE_MEMORY:-}"
 
 usage() {
@@ -40,6 +41,7 @@ Options:
   --dry-run               Strictly read-only audit (zero host installs, runs ansible-playbook --check)
   --ci                    CI mode: size Minikube cluster for 2 vCPUs and 4096 MB RAM
   --memory <MB>           Set custom Minikube memory in MB (e.g. --memory 6144, min: 2048)
+  --configure-host-sysctl Configure host Linux kernel sysctl and limits (/etc/sysctl.d, /etc/security/limits.d)
   -K, --ask-become-pass   Prompt for privilege escalation (sudo) password for ansible tasks
   -h, --help              Show this help message and exit
 EOF
@@ -58,6 +60,7 @@ parse_args() {
             --preflight-only) PREFLIGHT_ONLY=true; shift ;;
             --dry-run) DRY_RUN=true; shift ;;
             --ci) CI_MODE=true; shift ;;
+            --configure-host-sysctl) CONFIGURE_HOST_SYSCTL=true; shift ;;
             -K|--ask-become-pass) FORCE_ASK_BECOME=true; shift ;;
             --memory)
                 if [[ $# -lt 2 ]] || [[ -z "$2" ]] || [[ "$2" == --* ]]; then
@@ -129,6 +132,21 @@ ensure_ansible() {
     else echo -e "${RED}✗ Please install ansible-core (ansible-playbook).${NC}" >&2; exit 1; fi
 }
 
+host_needs_privilege() {
+    [ "${CONFIGURE_HOST_SYSCTL:-false}" = true ] && return 0
+    if [ "${HOST_PLATFORM:-}" == "Linux" ]; then
+        for tool in curl tar jq bzip2; do
+            command -v "$tool" >/dev/null 2>&1 || return 0
+        done
+        for tool in kubectl minikube helm testkube; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                [ ! -w "/usr/local/bin" ] && return 0
+            fi
+        done
+    fi
+    return 1
+}
+
 detect_sudo_mode() {
     SUDO_NEEDS_PASS=false
     local eff_uid="${MOCK_UID:-$(id -u)}"
@@ -143,6 +161,10 @@ prime_sudo() {
     local eff_uid="${MOCK_UID:-$(id -u)}"
     [ "$eff_uid" -eq 0 ] && return 0
     [ "${HOST_PLATFORM:-}" == "macOS" ] && return 0
+    # If privilege is not required by host tasks and -K was not passed, skip sudo session refresh
+    if ! host_needs_privilege && [ "$FORCE_ASK_BECOME" != true ]; then
+        return 0
+    fi
     # If Ansible will prompt for become password via --ask-become-pass, avoid double-prompting in bash
     [ "${SUDO_NEEDS_PASS:-false}" = true ] && return 0
     if ! sudo -n true 2>/dev/null; then
@@ -154,10 +176,16 @@ prime_sudo() {
 build_ansible_args() {
     local eff_uid="${MOCK_UID:-$(id -u)}"
     ANSIBLE_ARGS=(-i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml"
-                  -e "force_helm_upgrade=${FORCE_HELM}" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}")
+                  -e "force_helm_upgrade=${FORCE_HELM}"
+                  -e "minikube_ci_mode=${CI_MODE}"
+                  -e "minikube_custom_memory_mb=${CUSTOM_MEM}"
+                  -e "configure_linux_sysctl=${CONFIGURE_HOST_SYSCTL}")
     if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ]; then
         if [ "$FORCE_ASK_BECOME" = true ] || [ "${SUDO_NEEDS_PASS:-false}" = true ]; then
             ANSIBLE_ARGS+=(--ask-become-pass)
+        fi
+        if command -v sudo.ws >/dev/null 2>&1; then
+            ANSIBLE_ARGS+=(-e "ansible_become_exe=$(command -v sudo.ws)")
         fi
     fi
 }

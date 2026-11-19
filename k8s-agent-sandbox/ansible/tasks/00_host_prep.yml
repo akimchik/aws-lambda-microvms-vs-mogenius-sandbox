@@ -110,6 +110,7 @@
     - /etc/systemd/user.conf.d
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
+  ignore_unreachable: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -131,6 +132,7 @@
       fs.nr_open={{ nofile_controls.linux.fs_nr_open }}
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
+  ignore_unreachable: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -151,6 +153,7 @@
       root hard nofile {{ nofile_controls.linux.nofile_hard }}
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
+  ignore_unreachable: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -171,6 +174,7 @@
     - /etc/systemd/user.conf.d/99-nofile.conf
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
+  ignore_unreachable: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -187,6 +191,7 @@
     executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
+  ignore_unreachable: true
   failed_when: false
   changed_when: true
   when:
@@ -205,6 +210,8 @@
     - NetworkManager-wait-online.service
     - systemd-networkd-wait-online.service
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
