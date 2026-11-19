@@ -107,6 +107,7 @@
     - /etc/systemd/system.conf.d
     - /etc/systemd/user.conf.d
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -127,6 +128,7 @@
       fs.file-max={{ nofile_controls.linux.fs_file_max }}
       fs.nr_open={{ nofile_controls.linux.fs_nr_open }}
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -146,6 +148,7 @@
       root soft nofile {{ nofile_controls.linux.nofile_soft }}
       root hard nofile {{ nofile_controls.linux.nofile_hard }}
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -165,6 +168,7 @@
     - /etc/systemd/system.conf.d/99-nofile.conf
     - /etc/systemd/user.conf.d/99-nofile.conf
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
@@ -180,6 +184,7 @@
   args:
     executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
   failed_when: false
   changed_when: true
   when:
@@ -189,52 +194,6 @@
     - not (dry_run_mode | bool)
   tags: [host-prep, sysctl, nofile]
 
-- name: "[0/8] Audit live macOS open file limits and kernel sysctl"
-  ansible.builtin.shell: |
-    MAXFILES=$(sysctl -n kern.maxfiles 2>/dev/null || echo "0")
-    MAXFILESPERPROC=$(sysctl -n kern.maxfilesperproc 2>/dev/null || echo "0")
-    REQ_MAXFILES={{ nofile_controls.darwin.kern_maxfiles }}
-    REQ_MAXFILESPERPROC={{ nofile_controls.darwin.kern_maxfilesperproc }}
-    ADJUST="false"
-    if [ "$MAXFILES" -lt "$REQ_MAXFILES" ] || [ "$MAXFILESPERPROC" -lt "$REQ_MAXFILESPERPROC" ]; then
-      ADJUST="true"
-    fi
-    echo "MAXFILES=$MAXFILES"
-    echo "MAXFILESPERPROC=$MAXFILESPERPROC"
-    echo "NEEDS_ADJUSTMENT=$ADJUST"
-  args:
-    executable: /bin/bash
-  register: darwin_nofile_audit
-  changed_when: false
-  check_mode: false
-  when:
-    - ansible_facts['system'] == 'Darwin'
-  tags: [always, host-prep, sysctl, nofile]
-
-- name: "[0/8] Display macOS open file limit status"
-  ansible.builtin.debug:
-    msg: "macOS File Limits Audit: {{ darwin_nofile_audit.stdout_lines | default([]) }}"
-  when:
-    - ansible_facts['system'] == 'Darwin'
-  tags: [always, host-prep, sysctl, nofile]
-
-- name: "[0/8] Adjust macOS open file limits (kern.maxfiles and kern.maxfilesperproc)"
-  ansible.builtin.shell: |
-    sysctl -w kern.maxfiles={{ nofile_controls.darwin.kern_maxfiles }} kern.maxfilesperproc={{ nofile_controls.darwin.kern_maxfilesperproc }} >/dev/null 2>&1 || true
-    if [ ! -f /etc/sysctl.conf ] || ! grep -q "kern.maxfiles" /etc/sysctl.conf 2>/dev/null; then
-      echo "kern.maxfiles={{ nofile_controls.darwin.kern_maxfiles }}" >> /etc/sysctl.conf 2>/dev/null || true
-      echo "kern.maxfilesperproc={{ nofile_controls.darwin.kern_maxfilesperproc }}" >> /etc/sysctl.conf 2>/dev/null || true
-    fi
-  args:
-    executable: /bin/bash
-  become: "{{ ansible_facts['user_id'] != 'root' }}"
-  failed_when: false
-  changed_when: true
-  when:
-    - ansible_facts['system'] == 'Darwin'
-    - "'NEEDS_ADJUSTMENT=true' in (darwin_nofile_audit.stdout | default(''))"
-    - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl, nofile]
 
 - name: "[0/8] Mask systemd wait-online services when headless_vm_optimize=true"
   ansible.builtin.systemd:

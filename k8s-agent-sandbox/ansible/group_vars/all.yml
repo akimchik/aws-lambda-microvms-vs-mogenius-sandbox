@@ -23,7 +23,7 @@ testkube_cli_version: "latest"
 kubectl_version: "latest"
 k8s_fallback_version: "v1.31.0"
 
-# Open File & Descriptor Limits Controls (for high-concurrency port-forwarding & ingress)
+# Open File & Descriptor Limits Controls (for high-concurrency Linux port-forwarding & ingress)
 nofile_controls:
   linux:
     fs_file_max: 2097152
@@ -31,9 +31,6 @@ nofile_controls:
     nofile_soft: 1048576
     nofile_hard: 1048576
     systemd_limit_nofile: 1048576
-  darwin:
-    kern_maxfiles: 524288
-    kern_maxfilesperproc: 262144
 
 # Kernel sysctl parameters for multi-node Kubernetes + Prometheus + gVisor
 k8s_sysctl_params:

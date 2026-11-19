@@ -273,6 +273,18 @@ fi
     [ "$FORCE_HELM" = true ]
 ) && assert_test "parse_args(): Accepts --upgrade-helm" 0 || assert_test "parse_args(): Accepts --upgrade-helm" 1
 
+(
+    FORCE_ASK_BECOME=false
+    parse_args -K
+    [ "$FORCE_ASK_BECOME" = true ]
+) && assert_test "parse_args(): Accepts -K (--ask-become-pass)" 0 || assert_test "parse_args(): Accepts -K (--ask-become-pass)" 1
+
+(
+    FORCE_ASK_BECOME=false
+    parse_args --ask-become-pass
+    [ "$FORCE_ASK_BECOME" = true ]
+) && assert_test "parse_args(): Accepts --ask-become-pass" 0 || assert_test "parse_args(): Accepts --ask-become-pass" 1
+
 # Fail-fast error tests for parse_args
 if ( parse_args --memory >/dev/null 2>&1 ); then
     assert_test "parse_args(): Fails fast on missing --memory argument" 1
@@ -449,14 +461,21 @@ else
     assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
 fi
 
-# Regression Test: tasks/00_host_prep.yml audits and adjusts open file limits & systemd DefaultLimitNOFILE
+# Regression Test: tasks/00_host_prep.yml audits and adjusts open file limits & systemd DefaultLimitNOFILE on Linux
 if grep -q "nofile_controls" "${K8S_DIR}/ansible/group_vars/all.yml" && \
    grep -q "DefaultLimitNOFILE" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "fs.file-max" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "kern.maxfiles" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
-    assert_test "tasks/00_host_prep.yml: Open file & systemd DefaultLimitNOFILE controls implemented" 0
+   grep -q "fs.file-max" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: Linux open file & systemd DefaultLimitNOFILE controls implemented" 0
 else
-    assert_test "tasks/00_host_prep.yml: Open file & systemd DefaultLimitNOFILE controls implemented" 1
+    assert_test "tasks/00_host_prep.yml: Linux open file & systemd DefaultLimitNOFILE controls implemented" 1
+fi
+
+# Regression Test: tasks/00_host_prep.yml macOS tasks require zero become/sudo
+if ! awk '/ansible_facts..system.. == .Darwin./,/(tags:)/' "${K8S_DIR}/ansible/tasks/00_host_prep.yml" | grep -q "become:" && \
+   ! grep -q "kern.maxfiles" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: Darwin tasks execute without become/sudo and require no host sysctl" 0
+else
+    assert_test "tasks/00_host_prep.yml: Darwin tasks execute without become/sudo and require no host sysctl" 1
 fi
 
 # Regression Test: tasks/01_minikube_gvisor.yml uses uncompressed tar archive transfer (regular file over scp)

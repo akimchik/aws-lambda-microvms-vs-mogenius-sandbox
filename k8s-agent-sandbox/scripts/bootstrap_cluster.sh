@@ -25,6 +25,7 @@ FORCE_HELM=false
 PREFLIGHT_ONLY=false
 DRY_RUN=false
 CI_MODE=false
+FORCE_ASK_BECOME=false
 CUSTOM_MEM="${MINIKUBE_MEMORY:-}"
 
 usage() {
@@ -39,6 +40,7 @@ Options:
   --dry-run               Strictly read-only audit (zero host installs, runs ansible-playbook --check)
   --ci                    CI mode: size Minikube cluster for 2 vCPUs and 4096 MB RAM
   --memory <MB>           Set custom Minikube memory in MB (e.g. --memory 6144, min: 2048)
+  -K, --ask-become-pass   Prompt for privilege escalation (sudo) password for ansible tasks
   -h, --help              Show this help message and exit
 EOF
 }
@@ -56,6 +58,7 @@ parse_args() {
             --preflight-only) PREFLIGHT_ONLY=true; shift ;;
             --dry-run) DRY_RUN=true; shift ;;
             --ci) CI_MODE=true; shift ;;
+            -K|--ask-become-pass) FORCE_ASK_BECOME=true; shift ;;
             --memory)
                 if [[ $# -lt 2 ]] || [[ -z "$2" ]] || [[ "$2" == --* ]]; then
                     echo -e "${RED}✗ Error: --memory requires an integer >= 2048 MB.${NC}" >&2; exit 1
@@ -128,6 +131,7 @@ ensure_ansible() {
 
 prime_sudo() {
     [ "$(id -u)" -eq 0 ] && return 0
+    [ "${HOST_PLATFORM:-}" == "macOS" ] && return 0
     if ! sudo -n true 2>/dev/null; then
         echo -e "  ${CYAN}[>]${NC} Sudo credentials required for host toolchains. Refreshing session..."
         sudo -v || { echo -e "${RED}✗ Error: Sudo authentication failed.${NC}" >&2; exit 1; }
@@ -160,14 +164,21 @@ main() {
 
     ensure_ansible
     prime_sudo
+    local become_args=()
+    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$(id -u)" -ne 0 ]; then
+        if [ "$FORCE_ASK_BECOME" = true ] || ! echo "" | sudo -S -n true 2>/dev/null; then
+            become_args=(--ask-become-pass)
+        fi
+    fi
+
     local args=(-i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml"
                 -e "force_helm_upgrade=${FORCE_HELM}" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}")
     if [ "$PREFLIGHT_ONLY" = true ]; then
-        ansible-playbook "${args[@]}" --tags preflight
+        ansible-playbook "${args[@]}" "${become_args[@]}" --tags preflight
         echo -e "${GREEN}Preflight & Toolchain Discovery Successful (--preflight-only)!${NC}"
         exit 0
     fi
-    ansible-playbook "${args[@]}"
+    ansible-playbook "${args[@]}" "${become_args[@]}"
     echo -e "${GREEN}Cluster is 100% CONVERGED, HEALTHY & READY!${NC}"
 }
 
