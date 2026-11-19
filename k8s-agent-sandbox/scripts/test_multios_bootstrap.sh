@@ -355,48 +355,11 @@ EOF
 ) && assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS when running as root (UID 0)" 0 || \
    assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS when running as root (UID 0)" 1
 
-# Test build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password
-(
-    HOST_PLATFORM="Linux"
-    MOCK_UID=1000
-    FORCE_ASK_BECOME=false
-    SUDO_NEEDS_PASS=true
-    FORCE_HELM=false
-    CI_MODE=false
-    CUSTOM_MEM=""
-    build_ansible_args
-    has_flag=false
-    for arg in "${ANSIBLE_ARGS[@]}"; do
-        [ "$arg" == "--ask-become-pass" ] && has_flag=true
-    done
-    [ "$has_flag" = true ]
-) && assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password" 0 || \
-   assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password" 1
-
-# Test build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless
-(
-    HOST_PLATFORM="Linux"
-    MOCK_UID=1000
-    FORCE_ASK_BECOME=false
-    SUDO_NEEDS_PASS=false
-    FORCE_HELM=false
-    CI_MODE=false
-    CUSTOM_MEM=""
-    build_ansible_args
-    has_flag=false
-    for arg in "${ANSIBLE_ARGS[@]}"; do
-        [ "$arg" == "--ask-become-pass" ] && has_flag=true
-    done
-    [ "$has_flag" = false ]
-) && assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless" 0 || \
-   assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless" 1
-
 # Test build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed
 (
     HOST_PLATFORM="Linux"
     MOCK_UID=1000
     FORCE_ASK_BECOME=true
-    SUDO_NEEDS_PASS=false
     FORCE_HELM=false
     CI_MODE=false
     CUSTOM_MEM=""
@@ -409,12 +372,28 @@ EOF
 ) && assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed" 0 || \
    assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed" 1
 
+# Test build_ansible_args(): Omits --ask-become-pass on Linux when -K is not passed (standard execution)
+(
+    HOST_PLATFORM="Linux"
+    MOCK_UID=1000
+    FORCE_ASK_BECOME=false
+    FORCE_HELM=false
+    CI_MODE=false
+    CUSTOM_MEM=""
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = false ]
+) && assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when -K is not passed (standard execution)" 0 || \
+   assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when -K is not passed (standard execution)" 1
+
 # Test build_ansible_args(): Omits --ask-become-pass on Linux when running as root (UID 0)
 (
     HOST_PLATFORM="Linux"
     MOCK_UID=0
-    FORCE_ASK_BECOME=false
-    SUDO_NEEDS_PASS=true
+    FORCE_ASK_BECOME=true
     FORCE_HELM=false
     CI_MODE=false
     CUSTOM_MEM=""
@@ -705,30 +684,6 @@ if grep -q "ignore_unreachable: true" "${K8S_DIR}/ansible/tasks/00_host_prep.yml
 else
     assert_test "tasks/00_host_prep.yml: Sysctl tasks specify ignore_unreachable: true" 1
 fi
-
-# Regression Test: ansible.cfg configures privilege_escalation and sudo_become_plugin
-if grep -q "\[privilege_escalation\]" "${K8S_DIR}/ansible/ansible.cfg" && \
-   grep -q "\[sudo_become_plugin\]" "${K8S_DIR}/ansible/ansible.cfg"; then
-    assert_test "ansible.cfg: Configures privilege_escalation and sudo_become_plugin" 0
-else
-    assert_test "ansible.cfg: Configures privilege_escalation and sudo_become_plugin" 1
-fi
-
-# Regression Test: ansible/plugins/become/sudo.py matches Ubuntu sudo-rs wrapped password prompt
-(
-    if [ -n "$PY_BIN" ]; then
-        "$PY_BIN" -c "
-import re
-prompt = '[sudo via ansible, key=ezkiwamgebwhwtabxxycfuuaqbuipeqi] password:'
-sudo_rs = re.compile(rf'\[sudo:\s+{re.escape(prompt)}\]\s+\S.+\Z'.encode())
-line = b'[sudo: [sudo via ansible, key=ezkiwamgebwhwtabxxycfuuaqbuipeqi] password:] Password:'
-assert bool(sudo_rs.match(line)), 'sudo-rs regex failed to match wrapped Ubuntu prompt'
-"
-    else
-        grep -q "sudo_rs = re.compile" "${K8S_DIR}/ansible/plugins/become/sudo.py"
-    fi
-) && assert_test "ansible/plugins/become/sudo.py: Matches Ubuntu sudo-rs wrapped prompt format" 0 || \
-   assert_test "ansible/plugins/become/sudo.py: Matches Ubuntu sudo-rs wrapped prompt format" 1
 
 # Regression Test: tasks/00_host_prep.yml sysctl audit logic evaluates NEEDS_ADJUSTMENT=false when kernel limits are already sufficient (Ubuntu)
 (

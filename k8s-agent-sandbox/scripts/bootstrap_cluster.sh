@@ -197,11 +197,8 @@ build_ansible_args() {
                   -e "minikube_custom_memory_mb=${CUSTOM_MEM}"
                   -e "configure_linux_sysctl=${CONFIGURE_HOST_SYSCTL}")
     if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ]; then
-        if [ "$FORCE_ASK_BECOME" = true ] || [ "${SUDO_NEEDS_PASS:-false}" = true ]; then
+        if [ "$FORCE_ASK_BECOME" = true ]; then
             ANSIBLE_ARGS+=(--ask-become-pass)
-        fi
-        if command -v sudo.ws >/dev/null 2>&1; then
-            ANSIBLE_ARGS+=(-e "ansible_become_exe=$(command -v sudo.ws)")
         fi
     fi
 }
@@ -230,10 +227,8 @@ main() {
         exit 0
     fi
 
-    detect_sudo_mode
     ensure_ansible
     prime_sudo
-    detect_sudo_mode
     start_sudo_keepalive
     build_ansible_args
 
