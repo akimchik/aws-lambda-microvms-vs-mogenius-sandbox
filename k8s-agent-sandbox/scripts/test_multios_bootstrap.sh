@@ -408,6 +408,55 @@ else
     assert_test "install_host_bin(): Multi-path copy regression test (no double-mv crash)" 1
 fi
 
+# Regression Test: prime_sudo() must safely detect cached/passwordless sudo or root
+(
+    if [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
+        prime_sudo
+    fi
+) && assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 0 || \
+   assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 1
+
+# Regression Test: Host-side gVisor archive extraction (tar -xjf / Python tarfile)
+(
+    TEST_UNPACK_DIR="${MOCK_TMP_DIR}/gvisor_test_unpack"
+    mkdir -p "$TEST_UNPACK_DIR"
+    echo "MOCK_RUNSC_ELF" > "${TEST_UNPACK_DIR}/runsc"
+    echo "MOCK_SHIM_ELF" > "${TEST_UNPACK_DIR}/containerd-shim-runsc-v1"
+    tar -cf "${TEST_UNPACK_DIR}/test_gvisor.tar" -C "$TEST_UNPACK_DIR" runsc containerd-shim-runsc-v1
+    bzip2 "${TEST_UNPACK_DIR}/test_gvisor.tar" 2>/dev/null || gzip "${TEST_UNPACK_DIR}/test_gvisor.tar"
+    rm -f "${TEST_UNPACK_DIR}/runsc" "${TEST_UNPACK_DIR}/containerd-shim-runsc-v1"
+
+    ARCHIVE=$(ls "${TEST_UNPACK_DIR}/test_gvisor.tar."* | head -n1)
+    if [[ "$ARCHIVE" == *.bz2 ]]; then
+        if command -v bzip2 >/dev/null 2>&1 || tar -tf "$ARCHIVE" >/dev/null 2>&1; then
+            tar -xjf "$ARCHIVE" -C "$TEST_UNPACK_DIR"
+        else
+            python3 -c "import tarfile; tarfile.open('$ARCHIVE').extractall('$TEST_UNPACK_DIR')"
+        fi
+    else
+        tar -xzf "$ARCHIVE" -C "$TEST_UNPACK_DIR"
+    fi
+
+    [ -f "${TEST_UNPACK_DIR}/runsc" ] && [ -f "${TEST_UNPACK_DIR}/containerd-shim-runsc-v1" ]
+) && assert_test "gVisor host unpack regression: Extracts binaries on host without guest tools" 0 || \
+   assert_test "gVisor host unpack regression: Extracts binaries on host without guest tools" 1
+
+# Regression Test: tasks/00_host_prep.yml skips package managers when utilities exist
+if grep -q "base_utils_check" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "'MISSING:' in base_utils_check.stdout" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 0
+else
+    assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
+fi
+
+# Regression Test: tasks/01_minikube_gvisor.yml uses minikube cp instead of guest tar -xjf
+if grep -q "minikube cp .*minikube:/tmp/runsc" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+   ! grep -A 10 "minikube ssh" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" | grep -q "tar -xjf"; then
+    assert_test "tasks/01_minikube_gvisor.yml: Uses minikube cp for ELF binaries (zero guest bzip2 dependency)" 0
+else
+    assert_test "tasks/01_minikube_gvisor.yml: Uses minikube cp for ELF binaries (zero guest bzip2 dependency)" 1
+fi
+
 # ==============================================================================
 # [5/6] Multi-Arch Binary Download URLs & Live Network Reachability (if online)
 # ==============================================================================

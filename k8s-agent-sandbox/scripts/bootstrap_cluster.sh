@@ -126,6 +126,14 @@ ensure_ansible() {
     else echo -e "${RED}✗ Please install ansible-core (ansible-playbook).${NC}" >&2; exit 1; fi
 }
 
+prime_sudo() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    if ! sudo -n true 2>/dev/null; then
+        echo -e "  ${CYAN}[>]${NC} Sudo credentials required for host toolchains. Refreshing session..."
+        sudo -v || { echo -e "${RED}✗ Error: Sudo authentication failed.${NC}" >&2; exit 1; }
+    fi
+}
+
 main() {
     parse_args "$@"
     detect_platform
@@ -139,12 +147,19 @@ main() {
         if command -v ansible-playbook >/dev/null 2>&1; then
             ansible-playbook -i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml" \
                 --check --diff --tags preflight -e "dry_run_mode=true" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}"
+        else
+            echo -e "  ${YELLOW}[i]${NC} ansible-playbook not present; auditing host CLI tools directly:"
+            for tool in kubectl minikube helm testkube docker; do
+                if command -v "$tool" >/dev/null 2>&1; then echo -e "    ${GREEN}✓${NC} $tool: $(command -v "$tool")"
+                else echo -e "    ${YELLOW}✗${NC} $tool: MISSING"; fi
+            done
         fi
         echo -e "${GREEN}Dry-Run Audit Complete (--dry-run: Zero changes made)!${NC}"
         exit 0
     fi
 
     ensure_ansible
+    prime_sudo
     local args=(-i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml"
                 -e "force_helm_upgrade=${FORCE_HELM}" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}")
     if [ "$PREFLIGHT_ONLY" = true ]; then

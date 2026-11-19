@@ -17,6 +17,20 @@
     msg: "Host={{ ansible_facts['system'] }} ({{ ansible_facts['os_family'] }}) | Arch={{ ansible_facts['architecture'] }} (CLI={{ cli_arch }}, gVisor={{ runsc_arch }}) | PkgMgr={{ host_pkg_mgr }}"
   tags: [always, preflight, host-prep]
 
+- name: "[0/8] Check if base utilities are installed (curl, tar, jq, bzip2)"
+  ansible.builtin.shell: |
+    for tool in curl tar jq bzip2; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "MISSING:$tool"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: base_utils_check
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8] Install Linux base utilities via apt (Debian/Ubuntu)"
   ansible.builtin.apt:
     name: [curl, ca-certificates, tar, jq, bzip2]
@@ -26,6 +40,7 @@
   when:
     - ansible_facts['system'] == 'Linux'
     - ansible_facts['os_family'] == 'Debian'
+    - "'MISSING:' in base_utils_check.stdout"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
@@ -43,8 +58,18 @@
   when:
     - ansible_facts['system'] == 'Linux'
     - ansible_facts['os_family'] == 'RedHat'
+    - "'MISSING:' in base_utils_check.stdout"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
+
+- name: "[0/8] Check if sysctl configuration is already persisted"
+  ansible.builtin.stat:
+    path: /etc/sysctl.d/99-kubernetes-sandbox.conf
+  register: sysctl_stat
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - configure_linux_sysctl | bool
+  tags: [always, host-prep, sysctl]
 
 - name: "[0/8] Persist Linux kernel sysctl parameters (/etc/sysctl.d/99-kubernetes-sandbox.conf)"
   ansible.builtin.copy:
@@ -61,6 +86,7 @@
   when:
     - ansible_facts['system'] == 'Linux'
     - configure_linux_sysctl | bool
+    - not (sysctl_stat.stat.exists | default(false))
     - not (dry_run_mode | bool)
   tags: [host-prep, sysctl]
 
