@@ -292,6 +292,7 @@ fi
 # Test detect_sudo_mode(): Linux non-root with sudo requiring password -> SUDO_NEEDS_PASS=true
 (
     HOST_PLATFORM="Linux"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=false
     MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_fail"
     mkdir -p "$MOCK_SUDO_DIR"
@@ -309,6 +310,7 @@ EOF
 # Test detect_sudo_mode(): Linux non-root with passwordless sudo -> SUDO_NEEDS_PASS=false
 (
     HOST_PLATFORM="Linux"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=false
     MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_ok"
     mkdir -p "$MOCK_SUDO_DIR"
@@ -326,6 +328,7 @@ EOF
 # Test detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS
 (
     HOST_PLATFORM="macOS"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=false
     MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_fail"
     PATH="${MOCK_SUDO_DIR}:${PATH}"
@@ -334,9 +337,22 @@ EOF
 ) && assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS" 0 || \
    assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS" 1
 
+# Test detect_sudo_mode(): Never sets SUDO_NEEDS_PASS when running as root (UID 0)
+(
+    HOST_PLATFORM="Linux"
+    MOCK_UID=0
+    FORCE_ASK_BECOME=false
+    MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_fail"
+    PATH="${MOCK_SUDO_DIR}:${PATH}"
+    detect_sudo_mode
+    [ "$SUDO_NEEDS_PASS" = false ]
+) && assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS when running as root (UID 0)" 0 || \
+   assert_test "detect_sudo_mode(): Never sets SUDO_NEEDS_PASS when running as root (UID 0)" 1
+
 # Test build_ansible_args(): Appends --ask-become-pass on Linux when sudo requires password
 (
     HOST_PLATFORM="Linux"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=false
     SUDO_NEEDS_PASS=true
     FORCE_HELM=false
@@ -354,6 +370,7 @@ EOF
 # Test build_ansible_args(): Omits --ask-become-pass on Linux when sudo is passwordless
 (
     HOST_PLATFORM="Linux"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=false
     SUDO_NEEDS_PASS=false
     FORCE_HELM=false
@@ -371,6 +388,7 @@ EOF
 # Test build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed
 (
     HOST_PLATFORM="Linux"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=true
     SUDO_NEEDS_PASS=false
     FORCE_HELM=false
@@ -385,9 +403,28 @@ EOF
 ) && assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed" 0 || \
    assert_test "build_ansible_args(): Appends --ask-become-pass on Linux when -K flag is passed" 1
 
+# Test build_ansible_args(): Omits --ask-become-pass on Linux when running as root (UID 0)
+(
+    HOST_PLATFORM="Linux"
+    MOCK_UID=0
+    FORCE_ASK_BECOME=false
+    SUDO_NEEDS_PASS=true
+    FORCE_HELM=false
+    CI_MODE=false
+    CUSTOM_MEM=""
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = false ]
+) && assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when running as root (UID 0)" 0 || \
+   assert_test "build_ansible_args(): Omits --ask-become-pass on Linux when running as root (UID 0)" 1
+
 # Test build_ansible_args(): NEVER appends --ask-become-pass on macOS
 (
     HOST_PLATFORM="macOS"
+    MOCK_UID=1000
     FORCE_ASK_BECOME=true
     SUDO_NEEDS_PASS=true
     FORCE_HELM=false

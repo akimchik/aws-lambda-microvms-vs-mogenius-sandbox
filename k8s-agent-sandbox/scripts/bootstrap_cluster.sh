@@ -131,7 +131,8 @@ ensure_ansible() {
 
 detect_sudo_mode() {
     SUDO_NEEDS_PASS=false
-    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$(id -u)" -ne 0 ]; then
+    local eff_uid="${MOCK_UID:-$(id -u)}"
+    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ]; then
         if [ "$FORCE_ASK_BECOME" = true ] || ! sudo -n true 2>/dev/null; then
             SUDO_NEEDS_PASS=true
         fi
@@ -139,7 +140,8 @@ detect_sudo_mode() {
 }
 
 prime_sudo() {
-    [ "$(id -u)" -eq 0 ] && return 0
+    local eff_uid="${MOCK_UID:-$(id -u)}"
+    [ "$eff_uid" -eq 0 ] && return 0
     [ "${HOST_PLATFORM:-}" == "macOS" ] && return 0
     # If Ansible will prompt for become password via --ask-become-pass, avoid double-prompting in bash
     [ "${SUDO_NEEDS_PASS:-false}" = true ] && return 0
@@ -150,9 +152,10 @@ prime_sudo() {
 }
 
 build_ansible_args() {
+    local eff_uid="${MOCK_UID:-$(id -u)}"
     ANSIBLE_ARGS=(-i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml"
                   -e "force_helm_upgrade=${FORCE_HELM}" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}")
-    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$(id -u)" -ne 0 ]; then
+    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ]; then
         if [ "$FORCE_ASK_BECOME" = true ] || [ "${SUDO_NEEDS_PASS:-false}" = true ]; then
             ANSIBLE_ARGS+=(--ask-become-pass)
         fi
