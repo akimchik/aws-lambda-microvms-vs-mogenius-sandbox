@@ -153,6 +153,28 @@ The distinct images add up to only ~2.8 GB as reported by `crictl`; the rest is 
 
 ---
 
+### 🚀 Developer Cheatsheet: Makefile & Execution Modes
+
+To eliminate typing long nested script paths or memorizing CLI flags, the root [`Makefile`](Makefile) provides unified shortcuts for every stage of development, testing, and cluster lifecycle management:
+
+| Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile |
+| :--- | :--- | :--- | :--- |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, platform & arch matrix |
+| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit |
+| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) |
+| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) |
+| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods |
+| **Teardown** | `make clean` | `minikube delete -p minikube` | Deletes local Minikube cluster nodes |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (10 VUs) |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test |
+
+> [!NOTE]
+> **Privilege Escalation & Sudo Model:**
+> Standard cluster reconciliation runs **100% in user space** with zero root requirements and zero password prompts. Host `/etc/sysctl.d` and PAM file limit modifications are strictly opt-in (`--configure-host-sysctl`). For the complete architectural breakdown of the sudo keepalive loop, privilege boundaries, and CLI options, see the **[Privilege Escalation & Sudo Lifecycle Guide](docs/MULTI_OS_SETUP_GUIDE.md#privilege-escalation-sudo-lifecycle--security-model)** in the Multi-OS Setup Guide.
+
+---
+
 ### 🌐 Multi-Node Cluster Topology & Hardware Sizing
 
 To guarantee unbiased, accurate benchmarking and prevent noisy-neighbor interference between high-throughput load generators and sandboxed workloads, the platform architecture enforces a strict **2-node topology**:

@@ -34,8 +34,8 @@ nofile_controls:
 
 # Kernel sysctl parameters for multi-node Kubernetes + Prometheus + gVisor
 k8s_sysctl_params:
-  fs.inotify.max_user_watches: 524288
-  fs.inotify.max_user_instances: 512
+  fs.inotify.max_user_watches: 1048576
+  fs.inotify.max_user_instances: 8192
   vm.max_map_count: 262144
   net.ipv4.ip_forward: 1
   fs.file-max: 2097152

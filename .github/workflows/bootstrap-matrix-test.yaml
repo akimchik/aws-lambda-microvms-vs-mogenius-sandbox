@@ -3,8 +3,18 @@ name: Multi-OS & Multi-Architecture Bootstrap Matrix
 on:
   push:
     branches: [ "**" ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [ "main" ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   # ============================================================================

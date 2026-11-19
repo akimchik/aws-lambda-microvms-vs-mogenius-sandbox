@@ -169,8 +169,8 @@ prime_sudo() {
     if sudo -n true 2>/dev/null; then
         return 0
     fi
-    # If Ansible will prompt for become password via --ask-become-pass, avoid double-prompting in bash
-    [ "${SUDO_NEEDS_PASS:-false}" = true ] && return 0
+    # If Ansible will prompt for become password via --ask-become-pass (-K), avoid double-prompting in bash
+    [ "$FORCE_ASK_BECOME" = true ] && return 0
     if ! sudo -n true 2>/dev/null; then
         echo -e "  ${CYAN}[>]${NC} Sudo credentials required for host toolchains. Refreshing session..."
         sudo -v || { echo -e "${RED}✗ Error: Sudo authentication failed.${NC}" >&2; exit 1; }
@@ -186,6 +186,23 @@ start_sudo_keepalive() {
         ( while sudo -n true 2>/dev/null; do sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
         local keepalive_pid=$!
         trap 'kill '"$keepalive_pid"' 2>/dev/null || true' EXIT INT TERM
+    fi
+}
+
+audit_and_tune_linux_inotify() {
+    [ "${HOST_PLATFORM:-}" != "Linux" ] && return 0
+    local inst watch
+    inst=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)
+    watch=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo 0)
+    if [ "${inst:-0}" -lt 8192 ] 2>/dev/null || [ "${watch:-0}" -lt 524288 ] 2>/dev/null; then
+        if sudo -n true 2>/dev/null; then
+            echo -e "  ${CYAN}[>]${NC} Elevating Linux kernel inotify limits (instances=${inst}->8192, watches=${watch}->1048576)..."
+            sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=1048576 >/dev/null 2>&1 || true
+        elif [ "${CONFIGURE_HOST_SYSCTL:-false}" = true ]; then
+            run_priv sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=1048576 >/dev/null 2>&1 || true
+        else
+            echo -e "  ${YELLOW}[i]${NC} Note: Host inotify limits (instances=${inst}, watches=${watch}) will be elevated inside Minikube nodes (8192/1048576)."
+        fi
     fi
 }
 
@@ -230,6 +247,7 @@ main() {
     ensure_ansible
     prime_sudo
     start_sudo_keepalive
+    audit_and_tune_linux_inotify
     build_ansible_args
 
     if [ "$PREFLIGHT_ONLY" = true ]; then

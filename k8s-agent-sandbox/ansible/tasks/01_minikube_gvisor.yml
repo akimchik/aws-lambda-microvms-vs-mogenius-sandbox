@@ -50,6 +50,11 @@
     fi
     kubectl label node {{ minikube_worker_node }} dedicated=testkube node-role.kubernetes.io/worker=testkube --overwrite >/dev/null
     kubectl taint node {{ minikube_worker_node }} dedicated=testkube:NoSchedule --overwrite >/dev/null 2>&1 || true
+
+    # Configure high-concurrency inotify and open file limits inside Minikube nodes to prevent 'failed to create fsnotify watcher: too many open files'
+    for node in minikube {{ minikube_worker_node }}; do
+      minikube ssh -n "$node" "sudo sysctl -w fs.inotify.max_user_watches={{ k8s_sysctl_params['fs.inotify.max_user_watches'] }} fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }} fs.file-max={{ nofile_controls.linux.fs_file_max }} vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }} 2>/dev/null || true" >/dev/null 2>&1 || true
+    done
   args:
     executable: /bin/bash
   when: not (dry_run_mode | bool)
