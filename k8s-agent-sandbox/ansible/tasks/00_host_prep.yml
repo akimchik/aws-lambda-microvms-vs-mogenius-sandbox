@@ -62,14 +62,58 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
-- name: "[0/8] Check if sysctl configuration is already persisted"
-  ansible.builtin.stat:
-    path: /etc/sysctl.d/99-kubernetes-sandbox.conf
-  register: sysctl_stat
+- name: "[0/8] Audit live Linux open file limits and kernel sysctl"
+  ansible.builtin.shell: |
+    FILE_MAX=$(sysctl -n fs.file-max 2>/dev/null || echo "0")
+    NR_OPEN=$(sysctl -n fs.nr_open 2>/dev/null || echo "0")
+    REQ_FILE_MAX={{ nofile_controls.linux.fs_file_max }}
+    REQ_NR_OPEN={{ nofile_controls.linux.fs_nr_open }}
+    ADJUST="false"
+    if [ "$FILE_MAX" -lt "$REQ_FILE_MAX" ] || [ "$NR_OPEN" -lt "$REQ_NR_OPEN" ]; then
+      ADJUST="true"
+    fi
+    for f in /etc/sysctl.d/99-kubernetes-sandbox.conf /etc/security/limits.d/99-kubernetes-sandbox-nofile.conf /etc/systemd/system.conf.d/99-nofile.conf /etc/systemd/user.conf.d/99-nofile.conf; do
+      if [ ! -f "$f" ]; then ADJUST="true"; fi
+    done
+    echo "FILE_MAX=$FILE_MAX"
+    echo "NR_OPEN=$NR_OPEN"
+    echo "NEEDS_ADJUSTMENT=$ADJUST"
+  args:
+    executable: /bin/bash
+  register: linux_nofile_audit
+  changed_when: false
+  check_mode: false
   when:
     - ansible_facts['system'] == 'Linux'
     - configure_linux_sysctl | bool
-  tags: [always, host-prep, sysctl]
+  tags: [always, host-prep, sysctl, nofile]
+
+- name: "[0/8] Display Linux open file limit status"
+  ansible.builtin.debug:
+    msg: "Linux File Limits Audit: {{ linux_nofile_audit.stdout_lines | default([]) }}"
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - configure_linux_sysctl | bool
+  tags: [always, host-prep, sysctl, nofile]
+
+- name: "[0/8] Ensure systemd and security limits directories exist on Linux"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/sysctl.d
+    - /etc/security/limits.d
+    - /etc/systemd/system.conf.d
+    - /etc/systemd/user.conf.d
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
 
 - name: "[0/8] Persist Linux kernel sysctl parameters (/etc/sysctl.d/99-kubernetes-sandbox.conf)"
   ansible.builtin.copy:
@@ -80,15 +124,117 @@
       fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }}
       vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }}
       net.ipv4.ip_forward={{ k8s_sysctl_params['net.ipv4.ip_forward'] }}
+      fs.file-max={{ nofile_controls.linux.fs_file_max }}
+      fs.nr_open={{ nofile_controls.linux.fs_nr_open }}
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  register: sysctl_file_result
   failed_when: false
   when:
     - ansible_facts['system'] == 'Linux'
     - configure_linux_sysctl | bool
-    - not (sysctl_stat.stat.exists | default(false))
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl]
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8] Apply Linux open file descriptor limits in PAM (/etc/security/limits.d/99-kubernetes-sandbox-nofile.conf)"
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/99-kubernetes-sandbox-nofile.conf
+    mode: "0644"
+    content: |
+      # Open file limits for Kubernetes agent sandbox and ingress port-forwarding
+      * soft nofile {{ nofile_controls.linux.nofile_soft }}
+      * hard nofile {{ nofile_controls.linux.nofile_hard }}
+      root soft nofile {{ nofile_controls.linux.nofile_soft }}
+      root hard nofile {{ nofile_controls.linux.nofile_hard }}
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8] Apply systemd Manager DefaultLimitNOFILE to fix 'Failed to allocate manager object: Too many open files'"
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    mode: "0644"
+    content: |
+      [Manager]
+      DefaultLimitNOFILE={{ nofile_controls.linux.systemd_limit_nofile }}
+  loop:
+    - /etc/systemd/system.conf.d/99-nofile.conf
+    - /etc/systemd/user.conf.d/99-nofile.conf
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8] Reload Linux kernel sysctl and re-exec systemd daemon"
+  ansible.builtin.shell: |
+    sysctl -p /etc/sysctl.d/99-kubernetes-sandbox.conf >/dev/null 2>&1 || true
+    systemctl daemon-reexec >/dev/null 2>&1 || true
+  args:
+    executable: /bin/bash
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  changed_when: true
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8] Audit live macOS open file limits and kernel sysctl"
+  ansible.builtin.shell: |
+    MAXFILES=$(sysctl -n kern.maxfiles 2>/dev/null || echo "0")
+    MAXFILESPERPROC=$(sysctl -n kern.maxfilesperproc 2>/dev/null || echo "0")
+    REQ_MAXFILES={{ nofile_controls.darwin.kern_maxfiles }}
+    REQ_MAXFILESPERPROC={{ nofile_controls.darwin.kern_maxfilesperproc }}
+    ADJUST="false"
+    if [ "$MAXFILES" -lt "$REQ_MAXFILES" ] || [ "$MAXFILESPERPROC" -lt "$REQ_MAXFILESPERPROC" ]; then
+      ADJUST="true"
+    fi
+    echo "MAXFILES=$MAXFILES"
+    echo "MAXFILESPERPROC=$MAXFILESPERPROC"
+    echo "NEEDS_ADJUSTMENT=$ADJUST"
+  args:
+    executable: /bin/bash
+  register: darwin_nofile_audit
+  changed_when: false
+  check_mode: false
+  when:
+    - ansible_facts['system'] == 'Darwin'
+  tags: [always, host-prep, sysctl, nofile]
+
+- name: "[0/8] Display macOS open file limit status"
+  ansible.builtin.debug:
+    msg: "macOS File Limits Audit: {{ darwin_nofile_audit.stdout_lines | default([]) }}"
+  when:
+    - ansible_facts['system'] == 'Darwin'
+  tags: [always, host-prep, sysctl, nofile]
+
+- name: "[0/8] Adjust macOS open file limits (kern.maxfiles and kern.maxfilesperproc)"
+  ansible.builtin.shell: |
+    sysctl -w kern.maxfiles={{ nofile_controls.darwin.kern_maxfiles }} kern.maxfilesperproc={{ nofile_controls.darwin.kern_maxfilesperproc }} >/dev/null 2>&1 || true
+    if [ ! -f /etc/sysctl.conf ] || ! grep -q "kern.maxfiles" /etc/sysctl.conf 2>/dev/null; then
+      echo "kern.maxfiles={{ nofile_controls.darwin.kern_maxfiles }}" >> /etc/sysctl.conf 2>/dev/null || true
+      echo "kern.maxfilesperproc={{ nofile_controls.darwin.kern_maxfilesperproc }}" >> /etc/sysctl.conf 2>/dev/null || true
+    fi
+  args:
+    executable: /bin/bash
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  changed_when: true
+  when:
+    - ansible_facts['system'] == 'Darwin'
+    - "'NEEDS_ADJUSTMENT=true' in (darwin_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
 
 - name: "[0/8] Mask systemd wait-online services when headless_vm_optimize=true"
   ansible.builtin.systemd:

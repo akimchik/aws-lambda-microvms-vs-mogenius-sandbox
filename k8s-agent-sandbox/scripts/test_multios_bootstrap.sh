@@ -449,6 +449,16 @@ else
     assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
 fi
 
+# Regression Test: tasks/00_host_prep.yml audits and adjusts open file limits & systemd DefaultLimitNOFILE
+if grep -q "nofile_controls" "${K8S_DIR}/ansible/group_vars/all.yml" && \
+   grep -q "DefaultLimitNOFILE" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "fs.file-max" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "kern.maxfiles" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: Open file & systemd DefaultLimitNOFILE controls implemented" 0
+else
+    assert_test "tasks/00_host_prep.yml: Open file & systemd DefaultLimitNOFILE controls implemented" 1
+fi
+
 # Regression Test: tasks/01_minikube_gvisor.yml uses uncompressed tar archive transfer (regular file over scp)
 if grep -q "minikube cp .*minikube:/tmp/gvisor_raw.tar" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
    grep -q "tar -xf /tmp/gvisor_raw.tar" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \

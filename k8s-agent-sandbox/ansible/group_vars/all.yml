@@ -23,12 +23,26 @@ testkube_cli_version: "latest"
 kubectl_version: "latest"
 k8s_fallback_version: "v1.31.0"
 
+# Open File & Descriptor Limits Controls (for high-concurrency port-forwarding & ingress)
+nofile_controls:
+  linux:
+    fs_file_max: 2097152
+    fs_nr_open: 2097152
+    nofile_soft: 1048576
+    nofile_hard: 1048576
+    systemd_limit_nofile: 1048576
+  darwin:
+    kern_maxfiles: 524288
+    kern_maxfilesperproc: 262144
+
 # Kernel sysctl parameters for multi-node Kubernetes + Prometheus + gVisor
 k8s_sysctl_params:
   fs.inotify.max_user_watches: 524288
   fs.inotify.max_user_instances: 512
   vm.max_map_count: 262144
   net.ipv4.ip_forward: 1
+  fs.file-max: 2097152
+  fs.nr_open: 2097152
 
 # 11 Core Service Endpoints to verify at the end of reconciliation
 core_service_endpoints:
