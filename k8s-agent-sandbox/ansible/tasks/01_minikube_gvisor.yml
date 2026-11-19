@@ -71,23 +71,34 @@
 - name: "[3/8] Reconcile native Google gVisor (runsc), deduplicate containerd config.toml, and register RuntimeClass"
   ansible.builtin.shell: |
     set -euo pipefail
-    minikube ssh '
-    set -euo pipefail
-    sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true
-    if ! /usr/bin/runsc --version >/dev/null 2>&1 || ! head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF; then
-      NODE_ARCH=$(uname -m)
+    minikube ssh "sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true"
+
+    if ! minikube ssh "/usr/bin/runsc --version >/dev/null 2>&1 && head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF"; then
+      NODE_ARCH=$(minikube ssh "uname -m" 2>/dev/null | tr -d '\r\n')
       case "$NODE_ARCH" in
         x86_64|amd64) GVISOR_ARCH="x86_64" ;;
         aarch64|arm64) GVISOR_ARCH="aarch64" ;;
-        *) GVISOR_ARCH="$NODE_ARCH" ;;
+        *) GVISOR_ARCH="${NODE_ARCH:-x86_64}" ;;
       esac
       URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
-      curl -fsSL --retry 3 "${URL}/gvisor.tar.bz2" -o /tmp/gvisor.tar.bz2
-      tar -xjf /tmp/gvisor.tar.bz2 -C /tmp/
-      chmod a+rx /tmp/runsc /tmp/containerd-shim-runsc-v1
-      sudo mv /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/
-      rm -f /tmp/gvisor.tar.bz2
+
+      mkdir -p /tmp/gvisor_unpack
+      curl -fsSL --retry 3 "${URL}/gvisor.tar.bz2" -o /tmp/gvisor_unpack/gvisor.tar.bz2
+      if command -v bzip2 >/dev/null 2>&1 || tar -tf /tmp/gvisor_unpack/gvisor.tar.bz2 >/dev/null 2>&1; then
+        tar -xjf /tmp/gvisor_unpack/gvisor.tar.bz2 -C /tmp/gvisor_unpack/
+      else
+        python3 -c "import tarfile; tarfile.open('/tmp/gvisor_unpack/gvisor.tar.bz2').extractall('/tmp/gvisor_unpack/')"
+      fi
+      chmod a+rx /tmp/gvisor_unpack/runsc /tmp/gvisor_unpack/containerd-shim-runsc-v1
+
+      minikube cp /tmp/gvisor_unpack/runsc minikube:/tmp/runsc
+      minikube cp /tmp/gvisor_unpack/containerd-shim-runsc-v1 minikube:/tmp/containerd-shim-runsc-v1
+      minikube ssh "sudo mv -f /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/ && sudo chmod a+rx /usr/bin/runsc /usr/bin/containerd-shim-runsc-v1"
+      rm -rf /tmp/gvisor_unpack
     fi
+
+    minikube ssh '
+    set -euo pipefail
     CONFIG_PATH="/etc/containerd/config.toml"
     if [ ! -f "$CONFIG_PATH" ]; then
       sudo mkdir -p /etc/containerd
