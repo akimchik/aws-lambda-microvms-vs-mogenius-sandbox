@@ -92,11 +92,11 @@
       fi
       chmod -R a+rx /tmp/gvisor_unpack/
 
-      minikube cp /tmp/gvisor_unpack/runsc minikube:/tmp/runsc
-      minikube cp /tmp/gvisor_unpack/containerd-shim-runsc-v1 minikube:/tmp/containerd-shim-runsc-v1
-      minikube cp /tmp/gvisor_unpack/gvisor-bin minikube:/tmp/gvisor-bin
-      minikube ssh "sudo rm -rf /usr/bin/gvisor-bin && sudo mv -f /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/ && sudo mv -f /tmp/gvisor-bin /usr/bin/gvisor-bin && sudo chmod -R a+rx /usr/bin/runsc /usr/bin/containerd-shim-runsc-v1 /usr/bin/gvisor-bin"
-      rm -rf /tmp/gvisor_unpack
+      # Repack as a single uncompressed .tar so minikube cp transfers a regular file and guest tar needs no decompressor
+      tar -cf /tmp/gvisor_raw.tar -C /tmp/gvisor_unpack runsc containerd-shim-runsc-v1 gvisor-bin
+      minikube cp /tmp/gvisor_raw.tar minikube:/tmp/gvisor_raw.tar
+      minikube ssh "sudo rm -rf /usr/bin/gvisor-bin && sudo tar -xf /tmp/gvisor_raw.tar -C /usr/bin/ && sudo chmod -R a+rx /usr/bin/runsc /usr/bin/containerd-shim-runsc-v1 /usr/bin/gvisor-bin && sudo rm -f /tmp/gvisor_raw.tar"
+      rm -rf /tmp/gvisor_unpack /tmp/gvisor_raw.tar
     fi
 
     minikube ssh '

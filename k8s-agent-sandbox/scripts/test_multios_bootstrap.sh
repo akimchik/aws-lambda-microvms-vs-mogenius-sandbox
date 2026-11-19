@@ -449,14 +449,14 @@ else
     assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
 fi
 
-# Regression Test: tasks/01_minikube_gvisor.yml uses minikube cp for runsc, containerd-shim, and gvisor-bin
-if grep -q "minikube cp .*minikube:/tmp/runsc" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
-   grep -q "minikube cp .*minikube:/tmp/gvisor-bin" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+# Regression Test: tasks/01_minikube_gvisor.yml uses uncompressed tar archive transfer (regular file over scp)
+if grep -q "minikube cp .*minikube:/tmp/gvisor_raw.tar" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+   grep -q "tar -xf /tmp/gvisor_raw.tar" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
    grep -q "gvisor_sentry" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
    ! grep -A 10 "minikube ssh" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" | grep -q "tar -xjf"; then
-    assert_test "tasks/01_minikube_gvisor.yml: Copies gvisor-bin companion dir with gvisor_sentry" 0
+    assert_test "tasks/01_minikube_gvisor.yml: Uses uncompressed tar archive transfer with gvisor_sentry" 0
 else
-    assert_test "tasks/01_minikube_gvisor.yml: Copies gvisor-bin companion dir with gvisor_sentry" 1
+    assert_test "tasks/01_minikube_gvisor.yml: Uses uncompressed tar archive transfer with gvisor_sentry" 1
 fi
 
 # Regression Test: tasks/02_k8s_stack.yml tests live gVisor pod creation & SandboxWarmPool

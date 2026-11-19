@@ -122,7 +122,11 @@
         - name: probe
           image: registry.k8s.io/pause:3.9
     EOF
-    kubectl -n default wait --for=condition=Ready pod/gvisor-verification-probe --timeout=60s >/dev/null
+    if ! kubectl -n default wait --for=condition=Ready pod/gvisor-verification-probe --timeout=60s >/dev/null; then
+      echo "=== gVisor Verification Probe Failed! ===" >&2
+      kubectl -n default describe pod gvisor-verification-probe >&2
+      exit 1
+    fi
     kubectl -n default delete pod gvisor-verification-probe --ignore-not-found=true >/dev/null
   args:
     executable: /bin/bash
