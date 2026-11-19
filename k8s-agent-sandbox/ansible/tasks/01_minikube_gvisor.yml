@@ -73,7 +73,7 @@
     set -euo pipefail
     minikube ssh "sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true"
 
-    if ! minikube ssh "/usr/bin/runsc --version >/dev/null 2>&1 && head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF"; then
+    if ! minikube ssh "/usr/bin/runsc --version >/dev/null 2>&1 && head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF && [ -x /usr/bin/gvisor-bin/gvisor_sentry ]"; then
       NODE_ARCH=$(minikube ssh "uname -m" 2>/dev/null | tr -d '\r\n')
       case "$NODE_ARCH" in
         x86_64|amd64) GVISOR_ARCH="x86_64" ;;
@@ -82,6 +82,7 @@
       esac
       URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
 
+      rm -rf /tmp/gvisor_unpack
       mkdir -p /tmp/gvisor_unpack
       curl -fsSL --retry 3 "${URL}/gvisor.tar.bz2" -o /tmp/gvisor_unpack/gvisor.tar.bz2
       if command -v bzip2 >/dev/null 2>&1 || tar -tf /tmp/gvisor_unpack/gvisor.tar.bz2 >/dev/null 2>&1; then
@@ -89,11 +90,12 @@
       else
         python3 -c "import tarfile; tarfile.open('/tmp/gvisor_unpack/gvisor.tar.bz2').extractall('/tmp/gvisor_unpack/')"
       fi
-      chmod a+rx /tmp/gvisor_unpack/runsc /tmp/gvisor_unpack/containerd-shim-runsc-v1
+      chmod -R a+rx /tmp/gvisor_unpack/
 
       minikube cp /tmp/gvisor_unpack/runsc minikube:/tmp/runsc
       minikube cp /tmp/gvisor_unpack/containerd-shim-runsc-v1 minikube:/tmp/containerd-shim-runsc-v1
-      minikube ssh "sudo mv -f /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/ && sudo chmod a+rx /usr/bin/runsc /usr/bin/containerd-shim-runsc-v1"
+      minikube cp /tmp/gvisor_unpack/gvisor-bin minikube:/tmp/gvisor-bin
+      minikube ssh "sudo rm -rf /usr/bin/gvisor-bin && sudo mv -f /tmp/runsc /tmp/containerd-shim-runsc-v1 /usr/bin/ && sudo mv -f /tmp/gvisor-bin /usr/bin/gvisor-bin && sudo chmod -R a+rx /usr/bin/runsc /usr/bin/containerd-shim-runsc-v1 /usr/bin/gvisor-bin"
       rm -rf /tmp/gvisor_unpack
     fi
 

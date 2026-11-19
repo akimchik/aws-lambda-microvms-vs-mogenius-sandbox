@@ -105,6 +105,47 @@
   when: not (dry_run_mode | bool)
   tags: [testkube, k8s-stack]
 
+- name: "[Verify] Test live gVisor RuntimeClass sandbox creation"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl -n default delete pod gvisor-verification-probe --ignore-not-found=true >/dev/null
+    cat <<EOF | kubectl apply -f - >/dev/null
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: gvisor-verification-probe
+      namespace: default
+    spec:
+      runtimeClassName: gvisor
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: registry.k8s.io/pause:3.9
+    EOF
+    kubectl -n default wait --for=condition=Ready pod/gvisor-verification-probe --timeout=60s >/dev/null
+    kubectl -n default delete pod gvisor-verification-probe --ignore-not-found=true >/dev/null
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not (dry_run_mode | bool)
+  tags: [verify]
+
+- name: "[Verify] Assert mogenius SandboxWarmPool pods are running and ready"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for i in $(seq 1 30); do
+      if kubectl -n agent-sandbox get pods -l "sandboxwarmpool=default" 2>/dev/null | grep -q "Running"; then
+        break
+      fi
+      sleep 2
+    done
+    kubectl -n agent-sandbox wait --for=condition=Ready pod -l "sandboxwarmpool=default" --timeout=90s >/dev/null
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not (dry_run_mode | bool)
+  tags: [verify]
+
 - name: "[Verify] Assert all 11 core service endpoints have active backends"
   ansible.builtin.shell: |
     set -euo pipefail
