@@ -626,6 +626,22 @@ EOF
 ) && assert_test "prime_sudo(): Exits immediately on macOS without invoking sudo" 0 || \
    assert_test "prime_sudo(): Exits immediately on macOS without invoking sudo" 1
 
+# Regression Test: start_sudo_keepalive() exits immediately on macOS
+(
+    HOST_PLATFORM="macOS"
+    MOCK_UID=1000
+    start_sudo_keepalive
+) && assert_test "start_sudo_keepalive(): Exits immediately on macOS" 0 || \
+   assert_test "start_sudo_keepalive(): Exits immediately on macOS" 1
+
+# Regression Test: start_sudo_keepalive() exits immediately as root
+(
+    HOST_PLATFORM="Linux"
+    MOCK_UID=0
+    start_sudo_keepalive
+) && assert_test "start_sudo_keepalive(): Exits immediately as root (UID 0)" 0 || \
+   assert_test "start_sudo_keepalive(): Exits immediately as root (UID 0)" 1
+
 # Regression Test: Host-side gVisor archive extraction (tar -xjf / Python tarfile)
 (
     TEST_UNPACK_DIR="${MOCK_TMP_DIR}/gvisor_test_unpack"

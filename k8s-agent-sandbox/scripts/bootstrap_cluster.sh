@@ -165,11 +165,27 @@ prime_sudo() {
     if ! host_needs_privilege && [ "$FORCE_ASK_BECOME" != true ]; then
         return 0
     fi
+    # If already within sudo timeout, nothing to do!
+    if sudo -n true 2>/dev/null; then
+        return 0
+    fi
     # If Ansible will prompt for become password via --ask-become-pass, avoid double-prompting in bash
     [ "${SUDO_NEEDS_PASS:-false}" = true ] && return 0
     if ! sudo -n true 2>/dev/null; then
         echo -e "  ${CYAN}[>]${NC} Sudo credentials required for host toolchains. Refreshing session..."
         sudo -v || { echo -e "${RED}✗ Error: Sudo authentication failed.${NC}" >&2; exit 1; }
+    fi
+}
+
+start_sudo_keepalive() {
+    local eff_uid="${MOCK_UID:-$(id -u)}"
+    [ "${HOST_PLATFORM:-}" != "Linux" ] && return 0
+    [ "$eff_uid" -eq 0 ] && return 0
+    if sudo -n true 2>/dev/null; then
+        # Maintain sudo credentials within timestamp timeout for the duration of long reconciliations
+        ( while sudo -n true 2>/dev/null; do sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
+        local keepalive_pid=$!
+        trap 'kill '"$keepalive_pid"' 2>/dev/null || true' EXIT INT TERM
     fi
 }
 
@@ -217,6 +233,8 @@ main() {
     detect_sudo_mode
     ensure_ansible
     prime_sudo
+    detect_sudo_mode
+    start_sudo_keepalive
     build_ansible_args
 
     if [ "$PREFLIGHT_ONLY" = true ]; then
