@@ -164,21 +164,21 @@ main() {
 
     ensure_ansible
     prime_sudo
-    local become_args=()
-    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$(id -u)" -ne 0 ]; then
-        if [ "$FORCE_ASK_BECOME" = true ] || ! echo "" | sudo -S -n true 2>/dev/null; then
-            become_args=(--ask-become-pass)
-        fi
-    fi
 
     local args=(-i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml"
                 -e "force_helm_upgrade=${FORCE_HELM}" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}")
+    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$(id -u)" -ne 0 ]; then
+        if [ "$FORCE_ASK_BECOME" = true ] || ! echo "" | sudo -S -n true 2>/dev/null; then
+            args+=(--ask-become-pass)
+        fi
+    fi
+
     if [ "$PREFLIGHT_ONLY" = true ]; then
-        ansible-playbook "${args[@]}" "${become_args[@]}" --tags preflight
+        ansible-playbook "${args[@]}" --tags preflight
         echo -e "${GREEN}Preflight & Toolchain Discovery Successful (--preflight-only)!${NC}"
         exit 0
     fi
-    ansible-playbook "${args[@]}" "${become_args[@]}"
+    ansible-playbook "${args[@]}"
     echo -e "${GREEN}Cluster is 100% CONVERGED, HEALTHY & READY!${NC}"
 }
 
