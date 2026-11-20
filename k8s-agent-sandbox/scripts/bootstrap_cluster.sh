@@ -127,15 +127,17 @@ ensure_ansible() {
     echo -e "  ${CYAN}[>]${NC} Installing 'ansible-core' via ${PKG_MGR}..."
     if [ "$PKG_MGR" == "brew" ]; then brew install ansible
     elif [ "$PKG_MGR" == "apt" ]; then run_priv apt-get update -qq && run_priv apt-get install -y -qq ansible-core || run_priv apt-get install -y -qq ansible
-    elif [ "$PKG_MGR" == "dnf" ]; then run_priv dnf install -y ansible-core || run_priv dnf install -y ansible
-    elif [ "$PKG_MGR" == "yum" ]; then run_priv yum install -y ansible-core || run_priv yum install -y ansible
+    elif [ "$PKG_MGR" == "dnf" ]; then
+        run_priv dnf install -y ansible-core 2>/dev/null || { run_priv dnf install -y epel-release 2>/dev/null || true; run_priv dnf install -y ansible-core; } || run_priv dnf install -y ansible
+    elif [ "$PKG_MGR" == "yum" ]; then
+        run_priv yum install -y ansible-core 2>/dev/null || { run_priv yum install -y epel-release 2>/dev/null || true; run_priv yum install -y ansible-core; } || run_priv yum install -y ansible
     else echo -e "${RED}✗ Please install ansible-core (ansible-playbook).${NC}" >&2; exit 1; fi
 }
 
 host_needs_privilege() {
     [ "${CONFIGURE_HOST_SYSCTL:-false}" = true ] && return 0
     if [ "${HOST_PLATFORM:-}" == "Linux" ]; then
-        for tool in curl tar jq bzip2; do
+        for tool in curl tar jq bzip2 openssl; do
             command -v "$tool" >/dev/null 2>&1 || return 0
         done
         for tool in kubectl minikube helm testkube; do

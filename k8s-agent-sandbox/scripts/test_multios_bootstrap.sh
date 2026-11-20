@@ -674,6 +674,22 @@ else
     assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
 fi
 
+# Regression Test: tasks/00_host_prep.yml audits openssl in base_utils_check for get-helm-3 verification
+if grep -q "for tool in curl tar jq bzip2 openssl;" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "openssl" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "VERIFY_CHECKSUM=false" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 0
+else
+    assert_test "tasks/00_host_prep.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 1
+fi
+
+# Regression Test: bootstrap_cluster.sh host_needs_privilege audits openssl on Linux
+if grep -q "for tool in curl tar jq bzip2 openssl;" "${BOOTSTRAP_SCRIPT}"; then
+    assert_test "bootstrap_cluster.sh: host_needs_privilege checks openssl prerequisite on Linux" 0
+else
+    assert_test "bootstrap_cluster.sh: host_needs_privilege checks openssl prerequisite on Linux" 1
+fi
+
 # Regression Test: tasks/00_host_prep.yml audits and adjusts open file limits & systemd DefaultLimitNOFILE on Linux
 if grep -q "nofile_controls" "${K8S_DIR}/ansible/group_vars/all.yml" && \
    grep -q "DefaultLimitNOFILE" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \

@@ -17,9 +17,9 @@
     msg: "Host={{ ansible_facts['system'] }} ({{ ansible_facts['os_family'] }}) | Arch={{ ansible_facts['architecture'] }} (CLI={{ cli_arch }}, gVisor={{ runsc_arch }}) | PkgMgr={{ host_pkg_mgr }}"
   tags: [always, preflight, host-prep]
 
-- name: "[0/8] Check if base utilities are installed (curl, tar, jq, bzip2)"
+- name: "[0/8] Check if base utilities are installed (curl, tar, jq, bzip2, openssl)"
   ansible.builtin.shell: |
-    for tool in curl tar jq bzip2; do
+    for tool in curl tar jq bzip2 openssl; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "MISSING:$tool"
       fi
@@ -33,7 +33,7 @@
 
 - name: "[0/8] Install Linux base utilities via apt (Debian/Ubuntu)"
   ansible.builtin.apt:
-    name: [curl, ca-certificates, tar, jq, bzip2]
+    name: [curl, ca-certificates, tar, jq, bzip2, openssl, procps]
     state: present
     update_cache: true
   become: "{{ ansible_facts['user_id'] != 'root' }}"
@@ -47,9 +47,11 @@
 - name: "[0/8] Install Linux base utilities via dnf/yum (RHEL/Rocky/Alma/Fedora)"
   ansible.builtin.shell: |
     if command -v dnf >/dev/null 2>&1; then
-      dnf install -y --allowerasing curl ca-certificates tar jq bzip2
+      dnf install -y epel-release 2>/dev/null || true
+      dnf install -y --allowerasing curl ca-certificates tar jq bzip2 openssl procps-ng
     else
-      yum install -y curl ca-certificates tar jq bzip2
+      yum install -y epel-release 2>/dev/null || true
+      yum install -y curl ca-certificates tar jq bzip2 openssl procps-ng
     fi
   args:
     executable: /bin/bash
@@ -296,7 +298,22 @@
 - name: "[0/8] Install Helm v3 and Testkube CLI on Linux if missing"
   ansible.builtin.shell: |
     set -e
-    command -v helm >/dev/null 2>&1 || (curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash)
+    if ! command -v helm >/dev/null 2>&1; then
+      if ! command -v openssl >/dev/null 2>&1; then
+        if command -v dnf >/dev/null 2>&1; then
+          dnf install -y openssl 2>/dev/null || true
+        elif command -v apt-get >/dev/null 2>&1; then
+          apt-get update -qq && apt-get install -y openssl 2>/dev/null || true
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y openssl 2>/dev/null || true
+        fi
+      fi
+      if command -v openssl >/dev/null 2>&1; then
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      else
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | VERIFY_CHECKSUM=false bash
+      fi
+    fi
     if ! command -v testkube >/dev/null 2>&1; then
       TK_VER="{{ testkube_cli_version | default('latest') }}"
       if [ "$TK_VER" = "latest" ]; then

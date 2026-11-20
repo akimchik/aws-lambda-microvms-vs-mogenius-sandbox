@@ -202,7 +202,22 @@ EOF
 sudo sysctl --system
 ```
 
-### B. Install Docker Engine (Community Edition)
+### B. Base Prerequisites & Toolchains
+To eliminate component installation toil on minimal or clean Linux distributions, ensure standard utilities (specifically `openssl` for Helm checksum validation, `jq`, `bzip2`, and `tar`) are installed. The bootstrapper (`make preflight`) checks and installs these automatically, but for manual preparation:
+
+#### On Debian / Ubuntu:
+```bash
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates tar jq bzip2 openssl procps
+```
+
+#### On RHEL / Rocky Linux 9 & 10 / AlmaLinux / Fedora:
+```bash
+sudo dnf install -y epel-release 2>/dev/null || true
+sudo dnf install -y --allowerasing curl ca-certificates tar jq bzip2 openssl procps-ng
+```
+
+### C. Install Docker Engine (Community Edition)
 
 #### On Debian / Ubuntu (`apt` - `x86_64` & `aarch64`):
 ```bash
