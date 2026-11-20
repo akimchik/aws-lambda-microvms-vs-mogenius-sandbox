@@ -823,6 +823,26 @@ else
     assert_test "matrix flows 4 & 5 (Rocky): 00_host_prep_rocky.yml uses dnf/yum with secure_path symlinks and is isolated from Debian/macOS" 1
 fi
 
+# Matrix Flows 4 & 5 Test: 00_host_prep_rocky.yml handles curl-minimal and ensures docker group exists
+if grep -q "curl-minimal" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q -- "--allowerasing" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "Ensure docker group exists" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "Ensure docker group exists" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
+    assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 0
+else
+    assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 1
+fi
+
+# Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml guards systemd Docker activation against non-init container test runners
+if grep -q "failed_when: false" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "ansible_facts\['service_mgr'\] == 'systemd'" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "failed_when: false" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "ansible_facts\['service_mgr'\] == 'systemd'" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: guards systemd Docker activation against non-init container environments" 0
+else
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: guards systemd Docker activation against non-init container environments" 1
+fi
+
 # Makefile Test: All primary Make targets parse and dry-run without errors
 for target in help check dry-run preflight cluster clean status; do
     if make -C "${REPO_ROOT}" -n "$target" >/dev/null 2>&1; then

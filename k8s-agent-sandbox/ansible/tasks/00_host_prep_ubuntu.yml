@@ -280,6 +280,18 @@
     enabled: true
     state: started
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  failed_when: false
+  when:
+    - ansible_facts['service_mgr'] == 'systemd'
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Ensure docker group exists"
+  ansible.builtin.group:
+    name: docker
+    state: present
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]

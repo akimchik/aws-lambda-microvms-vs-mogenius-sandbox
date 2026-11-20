@@ -21,9 +21,30 @@
   tags: [always, preflight, host-prep]
 
 - name: "[0/8 Rocky] Install base utilities via dnf/yum"
-  ansible.builtin.package:
-    name: [curl, tar, jq, bzip2, procps-ng, openssl, ca-certificates]
-    state: present
+  ansible.builtin.shell: |
+    set -e
+    PACKAGES=""
+    command -v tar >/dev/null 2>&1 || PACKAGES="$PACKAGES tar"
+    command -v jq >/dev/null 2>&1 || PACKAGES="$PACKAGES jq"
+    command -v bzip2 >/dev/null 2>&1 || PACKAGES="$PACKAGES bzip2"
+    command -v ps >/dev/null 2>&1 || PACKAGES="$PACKAGES procps-ng"
+    command -v openssl >/dev/null 2>&1 || PACKAGES="$PACKAGES openssl"
+    if ! command -v curl >/dev/null 2>&1; then
+      if command -v dnf >/dev/null 2>&1 && dnf info curl-minimal >/dev/null 2>&1; then
+        PACKAGES="$PACKAGES curl-minimal"
+      else
+        PACKAGES="$PACKAGES curl"
+      fi
+    fi
+    if [ -n "$PACKAGES" ]; then
+      if command -v dnf >/dev/null 2>&1; then
+        dnf install -y --allowerasing $PACKAGES ca-certificates || dnf install -y $PACKAGES ca-certificates
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y $PACKAGES ca-certificates
+      fi
+    fi
+  args:
+    executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - "'MISSING:' in base_utils_check.stdout"
@@ -339,6 +360,18 @@
     name: docker
     enabled: true
     state: started
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  failed_when: false
+  when:
+    - ansible_facts['service_mgr'] == 'systemd'
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Ensure docker group exists"
+  ansible.builtin.group:
+    name: docker
+    state: present
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
