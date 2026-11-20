@@ -147,6 +147,14 @@ host_needs_privilege() {
             fi
         done
         command -v docker >/dev/null 2>&1 || return 0
+        # Check if invoking user belongs to the docker group
+        if command -v id >/dev/null 2>&1 && ! id -Gn 2>/dev/null | grep -qw docker; then
+            return 0
+        fi
+        # Check if /usr/local/bin/minikube exists but /usr/bin/minikube symlink is missing
+        if [ -f /usr/local/bin/minikube ] && [ ! -f /usr/bin/minikube ]; then
+            return 0
+        fi
     fi
     return 1
 }

@@ -104,6 +104,15 @@ else
     assert_test "Makefile exists: Makefile" 1
 fi
 
+# Check native Ansible playbook syntax via ansible-playbook --syntax-check
+if command -v ansible-playbook >/dev/null 2>&1; then
+    if ansible-playbook -i "${K8S_DIR}/ansible/inventory.ini" "${K8S_DIR}/ansible/playbooks/site.yml" --syntax-check >/dev/null 2>&1; then
+        assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 0
+    else
+        assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 1
+    fi
+fi
+
 # Check embedded bash scripts inside Ansible tasks (00_host_prep, 01_minikube_gvisor, 02_k8s_stack)
 if command -v ruby >/dev/null 2>&1; then
     EMBEDDED_SYNTAX_STATUS=$(ruby -ryaml -e '
@@ -792,7 +801,12 @@ fi
         touch "${MOCK_ALL_TOOLS_DIR}/${tool}"
         chmod +x "${MOCK_ALL_TOOLS_DIR}/${tool}"
     done
-    PATH="${MOCK_ALL_TOOLS_DIR}"
+    cat << 'EOF' > "${MOCK_ALL_TOOLS_DIR}/id"
+#!/bin/sh
+echo "docker staff"
+EOF
+    chmod +x "${MOCK_ALL_TOOLS_DIR}/id"
+    PATH="${MOCK_ALL_TOOLS_DIR}:${PATH}"
     if host_needs_privilege; then
         exit 1
     else
@@ -800,6 +814,25 @@ fi
     fi
 ) && assert_test "bootstrap_cluster.sh: host_needs_privilege returns 1 when all tools exist and /usr/local/bin is writable" 0 || \
    assert_test "bootstrap_cluster.sh: host_needs_privilege returns 1 when all tools exist and /usr/local/bin is writable" 1
+
+# Unit Test: host_needs_privilege() returns 0 when user is not in docker group
+(
+    HOST_PLATFORM="Linux"
+    MOCK_NO_GRP_DIR="${MOCK_TMP_DIR}/mock_no_grp"
+    mkdir -p "$MOCK_NO_GRP_DIR"
+    for tool in curl tar jq bzip2 openssl kubectl minikube helm testkube docker; do
+        touch "${MOCK_NO_GRP_DIR}/${tool}"
+        chmod +x "${MOCK_NO_GRP_DIR}/${tool}"
+    done
+    cat << 'EOF' > "${MOCK_NO_GRP_DIR}/id"
+#!/bin/sh
+echo "staff users"
+EOF
+    chmod +x "${MOCK_NO_GRP_DIR}/id"
+    PATH="${MOCK_NO_GRP_DIR}:${PATH}"
+    host_needs_privilege
+) && assert_test "bootstrap_cluster.sh: host_needs_privilege returns 0 when user is not in docker group" 0 || \
+   assert_test "bootstrap_cluster.sh: host_needs_privilege returns 0 when user is not in docker group" 1
 
 # Matrix Flow 1 Test: 00_host_prep_darwin.yml strictly user-space, zero become, zero linux tools
 if ! grep -q "become:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
@@ -839,6 +872,15 @@ if grep -q "curl-minimal" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
     assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 0
 else
     assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 1
+fi
+
+# Matrix Flows 4 & 5 Test: 00_host_prep_rocky.yml guards Minikube symlink and docker group behind presence checks
+if grep -q "usr_bin_minikube_stat" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "user_docker_group_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "user_docker_group_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
+    assert_test "privilege guard: Minikube symlink & Docker group tasks guarded behind presence audits to avoid unneeded sudo" 0
+else
+    assert_test "privilege guard: Minikube symlink & Docker group tasks guarded behind presence audits to avoid unneeded sudo" 1
 fi
 
 # Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml guards systemd Docker activation against non-init container test runners

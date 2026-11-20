@@ -287,6 +287,16 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Ubuntu] Check if user is already in docker group"
+  ansible.builtin.shell: |
+    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
+  args:
+    executable: /bin/bash
+  register: user_docker_group_check_ubuntu
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8 Ubuntu] Ensure docker group exists"
   ansible.builtin.group:
     name: docker
@@ -294,6 +304,7 @@
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
+    - "'NOT_IN_GROUP' in (user_docker_group_check_ubuntu.stdout | default('NOT_IN_GROUP'))"
   tags: [preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Add invoking user to docker group (secure group membership)"
@@ -304,6 +315,7 @@
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
+    - "'NOT_IN_GROUP' in (user_docker_group_check_ubuntu.stdout | default('NOT_IN_GROUP'))"
   tags: [preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Verify Docker container runtime is available on host"

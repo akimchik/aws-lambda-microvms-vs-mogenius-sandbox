@@ -254,15 +254,23 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Rocky] Check if /usr/bin/minikube exists"
+  ansible.builtin.stat:
+    path: /usr/bin/minikube
+  register: usr_bin_minikube_stat
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8 Rocky] Ensure /usr/bin symlink for Minikube (secure_path compatibility)"
   ansible.builtin.shell: |
-    [ -f /usr/local/bin/minikube ] && [ ! -f /usr/bin/minikube ] && [ -d /usr/bin ] && [ -w /usr/bin ] && ln -sf /usr/local/bin/minikube /usr/bin/minikube 2>/dev/null || true
+    [ -f /usr/local/bin/minikube ] && ln -sf /usr/local/bin/minikube /usr/bin/minikube
   args:
     executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  changed_when: false
+  changed_when: true
   when:
     - not (dry_run_mode | bool)
+    - not usr_bin_minikube_stat.stat.exists
+    - (cli_audit_rocky.stdout is defined and 'PRESENT:minikube:/usr/local/bin/minikube' in cli_audit_rocky.stdout)
   tags: [preflight, host-prep]
 
 - name: "[0/8 Rocky] Install Helm v3 and Testkube CLI if missing"
@@ -368,6 +376,16 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Rocky] Check if user is already in docker group"
+  ansible.builtin.shell: |
+    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
+  args:
+    executable: /bin/bash
+  register: user_docker_group_check_rocky
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8 Rocky] Ensure docker group exists"
   ansible.builtin.group:
     name: docker
@@ -375,6 +393,7 @@
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
+    - "'NOT_IN_GROUP' in (user_docker_group_check_rocky.stdout | default('NOT_IN_GROUP'))"
   tags: [preflight, host-prep]
 
 - name: "[0/8 Rocky] Add invoking user to docker group (secure group membership)"
@@ -385,6 +404,7 @@
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
+    - "'NOT_IN_GROUP' in (user_docker_group_check_rocky.stdout | default('NOT_IN_GROUP'))"
   tags: [preflight, host-prep]
 
 - name: "[0/8 Rocky] Verify Docker container runtime is available on host"
