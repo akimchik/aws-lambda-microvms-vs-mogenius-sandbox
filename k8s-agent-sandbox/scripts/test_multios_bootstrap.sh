@@ -874,13 +874,14 @@ else
     assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 1
 fi
 
-# Matrix Flows 4 & 5 Test: 00_host_prep_rocky.yml guards Minikube symlink and docker group behind presence checks
-if grep -q "usr_bin_minikube_stat" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+# Matrix Flows 2-5 Test: 00_host_prep_{ubuntu,rocky}.yml guard Docker service and group behind presence audits
+if grep -q "docker_daemon_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "docker_daemon_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
    grep -q "user_docker_group_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
    grep -q "user_docker_group_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
-    assert_test "privilege guard: Minikube symlink & Docker group tasks guarded behind presence audits to avoid unneeded sudo" 0
+    assert_test "privilege guard: Docker service & group tasks guarded behind presence audits to avoid unneeded sudo" 0
 else
-    assert_test "privilege guard: Minikube symlink & Docker group tasks guarded behind presence audits to avoid unneeded sudo" 1
+    assert_test "privilege guard: Docker service & group tasks guarded behind presence audits to avoid unneeded sudo" 1
 fi
 
 # Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml guards systemd Docker activation against non-init container test runners

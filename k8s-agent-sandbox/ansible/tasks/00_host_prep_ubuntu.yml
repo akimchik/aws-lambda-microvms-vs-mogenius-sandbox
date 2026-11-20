@@ -274,6 +274,16 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Ubuntu] Check if Docker daemon is already active"
+  ansible.builtin.shell: |
+    docker info >/dev/null 2>&1 && echo "ACTIVE" || echo "INACTIVE"
+  args:
+    executable: /bin/bash
+  register: docker_daemon_check_ubuntu
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8 Ubuntu] Enable and start Docker service"
   ansible.builtin.systemd:
     name: docker
@@ -285,11 +295,12 @@
   when:
     - ansible_facts['service_mgr'] == 'systemd'
     - not (dry_run_mode | bool)
+    - "'INACTIVE' in (docker_daemon_check_ubuntu.stdout | default('INACTIVE'))"
   tags: [preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Check if user is already in docker group"
   ansible.builtin.shell: |
-    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
+    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
   args:
     executable: /bin/bash
   register: user_docker_group_check_ubuntu
@@ -309,7 +320,7 @@
 
 - name: "[0/8 Ubuntu] Add invoking user to docker group (secure group membership)"
   ansible.builtin.user:
-    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}"
+    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
     groups: docker
     append: yes
   become: "{{ ansible_facts['user_id'] != 'root' }}"

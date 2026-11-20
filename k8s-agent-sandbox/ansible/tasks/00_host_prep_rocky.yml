@@ -254,25 +254,6 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
-- name: "[0/8 Rocky] Check if /usr/bin/minikube exists"
-  ansible.builtin.stat:
-    path: /usr/bin/minikube
-  register: usr_bin_minikube_stat
-  tags: [always, preflight, host-prep]
-
-- name: "[0/8 Rocky] Ensure /usr/bin symlink for Minikube (secure_path compatibility)"
-  ansible.builtin.shell: |
-    [ -f /usr/local/bin/minikube ] && ln -sf /usr/local/bin/minikube /usr/bin/minikube
-  args:
-    executable: /bin/bash
-  become: "{{ ansible_facts['user_id'] != 'root' }}"
-  changed_when: true
-  when:
-    - not (dry_run_mode | bool)
-    - not usr_bin_minikube_stat.stat.exists
-    - (cli_audit_rocky.stdout is defined and 'PRESENT:minikube:/usr/local/bin/minikube' in cli_audit_rocky.stdout)
-  tags: [preflight, host-prep]
-
 - name: "[0/8 Rocky] Install Helm v3 and Testkube CLI if missing"
   ansible.builtin.shell: |
     set -e
@@ -317,6 +298,12 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Rocky] Check if /etc/profile.d/00-local-bin.sh exists"
+  ansible.builtin.stat:
+    path: /etc/profile.d/00-local-bin.sh
+  register: profile_local_bin_stat_rocky
+  tags: [always, host-prep]
+
 - name: "[0/8 Rocky] Ensure /usr/local/bin is in global environment"
   ansible.builtin.copy:
     dest: /etc/profile.d/00-local-bin.sh
@@ -332,7 +319,9 @@
   ignore_unreachable: true
   when:
     - not (dry_run_mode | bool)
-  tags: [host-prep, preflight]
+    - not profile_local_bin_stat_rocky.stat.exists
+    - "'MISSING:' in cli_audit_rocky.stdout"
+  tags: [host-prep]
 
 # ------------------------------------------------------------------------------
 # Secure Docker CE Installation & Service Activation
@@ -363,6 +352,16 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Rocky] Check if Docker daemon is already active"
+  ansible.builtin.shell: |
+    docker info >/dev/null 2>&1 && echo "ACTIVE" || echo "INACTIVE"
+  args:
+    executable: /bin/bash
+  register: docker_daemon_check_rocky
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8 Rocky] Enable and start Docker service"
   ansible.builtin.systemd:
     name: docker
@@ -374,11 +373,12 @@
   when:
     - ansible_facts['service_mgr'] == 'systemd'
     - not (dry_run_mode | bool)
+    - "'INACTIVE' in (docker_daemon_check_rocky.stdout | default('INACTIVE'))"
   tags: [preflight, host-prep]
 
 - name: "[0/8 Rocky] Check if user is already in docker group"
   ansible.builtin.shell: |
-    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
+    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
   args:
     executable: /bin/bash
   register: user_docker_group_check_rocky
@@ -398,7 +398,7 @@
 
 - name: "[0/8 Rocky] Add invoking user to docker group (secure group membership)"
   ansible.builtin.user:
-    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}"
+    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
     groups: docker
     append: yes
   become: "{{ ansible_facts['user_id'] != 'root' }}"
