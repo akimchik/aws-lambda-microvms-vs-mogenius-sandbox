@@ -14,7 +14,7 @@
 #   • Read-Only Dry-Run Audit : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
 # ==============================================================================
 set -euo pipefail
-export PATH="/usr/local/bin:/usr/local/sbin:${PATH:-/usr/bin:/bin}"
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:${PATH:-/usr/bin:/bin}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -146,6 +146,7 @@ host_needs_privilege() {
                 [ ! -w "/usr/local/bin" ] && return 0
             fi
         done
+        command -v docker >/dev/null 2>&1 || return 0
     fi
     return 1
 }
@@ -253,12 +254,28 @@ main() {
     audit_and_tune_linux_inotify
     build_ansible_args
 
+    # Stage 0: Host OS, Kernel Sysctl & Toolchain Preparation
+    ansible-playbook "${ANSIBLE_ARGS[@]}" --tags preflight -e "preflight_only_mode=true"
+
     if [ "$PREFLIGHT_ONLY" = true ]; then
-        ansible-playbook "${ANSIBLE_ARGS[@]}" --tags preflight
         echo -e "${GREEN}Preflight & Toolchain Discovery Successful (--preflight-only)!${NC}"
         exit 0
     fi
-    ansible-playbook "${ANSIBLE_ARGS[@]}"
+
+    # On Linux, ensure active session has docker group if user belongs to it
+    local eff_uid="${MOCK_UID:-$(id -u)}"
+    if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ] && [ "${BOOTSTRAP_SG_ACTIVE:-false}" != "true" ]; then
+        if ! docker info >/dev/null 2>&1 && command -v sg >/dev/null 2>&1; then
+            if sg docker -c "docker info" >/dev/null 2>&1; then
+                echo -e "  ${CYAN}[>]${NC} Activating 'docker' supplementary group for cluster reconciliation..."
+                export BOOTSTRAP_SG_ACTIVE="true"
+                exec sg docker -c "$0 $*"
+            fi
+        fi
+    fi
+
+    # Stages 1-8: Minikube, gVisor, mogenius & Testkube Reconciliation
+    ansible-playbook "${ANSIBLE_ARGS[@]}" --skip-tags preflight
     echo -e "${GREEN}Cluster is 100% CONVERGED, HEALTHY & READY!${NC}"
 }
 

@@ -4,7 +4,7 @@
 # Provides fast static checks (zero VM spin-up) vs. full cluster reconciliation.
 # ==============================================================================
 
-export PATH := /usr/local/bin:/usr/local/sbin:$(PATH)
+export PATH := /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$(PATH)
 
 .PHONY: all help test check dry-run preflight cluster bootstrap clean status test-security test-benchmark test-load
 
@@ -27,6 +27,9 @@ help:
 	@echo "  make test-security   - Run in-guest threat probe + k6 security & tenant isolation audit"
 	@echo "  make test-benchmark  - Run 60 QPS performance & concurrency benchmark"
 	@echo "  make test-load       - Run sustained 70 RPS load test"
+	@echo ""
+	@echo "Options:"
+	@echo "  Pass ARGS='<flags>' to forward CLI options (e.g., make cluster ARGS='-K' or make preflight ARGS='--memory 4096')"
 
 # Fast verification: syntax, YAML schemas, and unit tests (Zero VM spinup)
 test check:
@@ -36,24 +39,25 @@ test check:
 # Read-only dry-run audit (validates Ansible syntax, host tools, and sizing without mutations)
 dry-run:
 	@echo "==> Running Read-Only Dry-Run Audit (--dry-run)..."
-	@./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+	@./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run $(ARGS)
 
 # Host toolchain discovery & preflight check only
 preflight:
 	@echo "==> Running Host Toolchain Preflight Discovery (--preflight-only)..."
-	@./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+	@./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only $(ARGS)
 
 # Full cluster bringup and 8-stage reconciliation (HEAVY: spins up Minikube nodes & containers)
 cluster bootstrap:
 	@echo "==> Running Full 8-Stage Cluster Reconciler..."
-	@./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+	@./k8s-agent-sandbox/scripts/bootstrap_cluster.sh $(ARGS)
 
 # Inspect cluster health and pods
 status:
 	@echo "==> Minikube Nodes:"
-	@kubectl get nodes -o wide || minikube status -p minikube
-	@echo "\n==> Workload Pods:"
-	@kubectl get pods -A
+	@kubectl get nodes -o wide 2>/dev/null || minikube status 2>/dev/null || echo "Cluster is not running"
+	@echo ""
+	@echo "==> Workload Pods:"
+	@kubectl get pods -A 2>/dev/null || true
 
 # Testkube test execution targets
 test-security:
@@ -71,4 +75,4 @@ test-load:
 # Teardown local cluster
 clean:
 	@echo "==> Deleting Minikube cluster nodes..."
-	@minikube delete -p minikube || true
+	@minikube delete 2>/dev/null || true

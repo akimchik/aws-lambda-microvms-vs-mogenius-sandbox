@@ -11,6 +11,7 @@ minikube_worker_node: minikube-m02
 # Execution Modes
 force_helm_upgrade: false
 dry_run_mode: false
+preflight_only_mode: false
 
 # Optional Linux VM Headless & Kernel Optimizations
 configure_linux_sysctl: true

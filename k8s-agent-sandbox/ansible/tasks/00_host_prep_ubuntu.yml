@@ -1,0 +1,322 @@
+---
+# ==============================================================================
+# FLOWS 2 & 3: Ubuntu Linux (x86_64 & aarch64) Host Toolchain Preparation
+# Package Manager: apt-get
+# ==============================================================================
+
+- name: "[0/8 Ubuntu] Check if base utilities are installed (curl, tar, jq, bzip2, openssl)"
+  ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    for tool in curl tar jq bzip2 openssl; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "MISSING:$tool"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: base_utils_check
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Install base utilities via apt"
+  ansible.builtin.apt:
+    name: [curl, tar, jq, bzip2, procps, openssl, ca-certificates]
+    state: present
+    update_cache: yes
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - "'MISSING:' in base_utils_check.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+# ------------------------------------------------------------------------------
+# Kernel sysctl, open files & inotify controls
+# ------------------------------------------------------------------------------
+- name: "[0/8 Ubuntu] Audit live open file limits and kernel sysctl"
+  ansible.builtin.shell: |
+    FILE_MAX=$(sysctl -n fs.file-max 2>/dev/null || cat /proc/sys/fs/file-max 2>/dev/null || echo 0)
+    NR_OPEN=$(sysctl -n fs.nr_open 2>/dev/null || cat /proc/sys/fs/nr_open 2>/dev/null || echo 0)
+    VM_MAX=$(sysctl -n vm.max_map_count 2>/dev/null || cat /proc/sys/vm/max_map_count 2>/dev/null || echo 0)
+    INOTIFY_WATCH=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo 0)
+    INOTIFY_INST=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)
+    REQ_FILE_MAX={{ nofile_controls.linux.fs_file_max }}
+    REQ_NR_OPEN={{ nofile_controls.linux.fs_nr_open }}
+    NEEDS_ADJUSTMENT="false"
+    if [ "$FILE_MAX" -lt "$REQ_FILE_MAX" ] || [ "$NR_OPEN" -lt "$REQ_NR_OPEN" ] || \
+       [ "$VM_MAX" -lt 262144 ] || [ "$INOTIFY_WATCH" -lt 524288 ] || [ "$INOTIFY_INST" -lt 8192 ]; then
+      NEEDS_ADJUSTMENT="true"
+    fi
+    echo "NEEDS_ADJUSTMENT=$NEEDS_ADJUSTMENT:live_file_max=$FILE_MAX:live_nr_open=$NR_OPEN:live_vm_max=$VM_MAX:live_inotify_watches=$INOTIFY_WATCH:live_inotify_instances=$INOTIFY_INST"
+  args:
+    executable: /bin/bash
+  register: linux_nofile_audit
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep, sysctl, nofile]
+
+- name: "[0/8 Ubuntu] Ensure systemd and security limits directories exist"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/sysctl.d
+    - /etc/security/limits.d
+    - /etc/systemd/system.conf.d
+    - /etc/systemd/user.conf.d
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8 Ubuntu] Persist kernel sysctl parameters (/etc/sysctl.d/99-kubernetes-sandbox.conf)"
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-kubernetes-sandbox.conf
+    mode: "0644"
+    content: |
+      # Kubernetes agent sandbox, gVisor & Prometheus tuning
+      fs.file-max={{ nofile_controls.linux.fs_file_max }}
+      fs.nr_open={{ nofile_controls.linux.fs_nr_open }}
+      fs.inotify.max_user_watches={{ k8s_sysctl_params['fs.inotify.max_user_watches'] }}
+      fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }}
+      vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }}
+      net.ipv4.ip_forward={{ k8s_sysctl_params['net.ipv4.ip_forward'] }}
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8 Ubuntu] Apply open file descriptor limits in PAM (/etc/security/limits.d/99-kubernetes-sandbox-nofile.conf)"
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/99-kubernetes-sandbox-nofile.conf
+    mode: "0644"
+    content: |
+      # Open file limits for Kubernetes agent sandbox and ingress port-forwarding
+      * soft nofile {{ nofile_controls.linux.nofile_soft }}
+      * hard nofile {{ nofile_controls.linux.nofile_hard }}
+      root soft nofile {{ nofile_controls.linux.nofile_soft }}
+      root hard nofile {{ nofile_controls.linux.nofile_hard }}
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8 Ubuntu] Apply systemd Manager DefaultLimitNOFILE"
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    mode: "0644"
+    content: |
+      [Manager]
+      DefaultLimitNOFILE={{ nofile_controls.linux.systemd_limit_nofile }}
+  loop:
+    - /etc/systemd/system.conf.d/99-nofile.conf
+    - /etc/systemd/user.conf.d/99-nofile.conf
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8 Ubuntu] Reload kernel sysctl and re-exec systemd daemon"
+  ansible.builtin.shell: |
+    sysctl -p /etc/sysctl.d/99-kubernetes-sandbox.conf >/dev/null 2>&1 || true
+    systemctl daemon-reexec >/dev/null 2>&1 || true
+  args:
+    executable: /bin/bash
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  failed_when: false
+  changed_when: true
+  when:
+    - configure_linux_sysctl | bool
+    - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
+    - not (dry_run_mode | bool)
+  tags: [host-prep, sysctl, nofile]
+
+- name: "[0/8 Ubuntu] Mask systemd wait-online services when headless_vm_optimize=true"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    masked: true
+  loop:
+    - NetworkManager-wait-online.service
+    - systemd-networkd-wait-online.service
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - headless_vm_optimize | bool
+    - not (dry_run_mode | bool)
+  tags: [host-prep, vm-optimize]
+
+# ------------------------------------------------------------------------------
+# CLI Tools Audit & Multi-Architecture Binary Provisioning
+# ------------------------------------------------------------------------------
+- name: "[0/8 Ubuntu] Audit host CLI tools (kubectl, minikube, helm, testkube, docker)"
+  ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    for tool in kubectl minikube helm testkube docker; do
+      if command -v "$tool" >/dev/null 2>&1; then
+        echo "PRESENT:$tool:$(command -v "$tool")"
+      else
+        echo "MISSING:$tool"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: cli_audit_ubuntu
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Install multi-arch kubectl if missing"
+  ansible.builtin.shell: |
+    set -e
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    K8S_VER="{{ kubectl_version | default('latest') }}"
+    if [ "$K8S_VER" = "latest" ]; then
+      K8S_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo "{{ k8s_fallback_version }}")
+    fi
+    curl -fsSL "https://dl.k8s.io/release/${K8S_VER}/bin/linux/{{ cli_arch }}/kubectl" -o /usr/local/bin/kubectl
+    chmod 0755 /usr/local/bin/kubectl
+  args:
+    executable: /bin/bash
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  changed_when: true
+  when:
+    - "'MISSING:kubectl' in cli_audit_ubuntu.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Check installed Minikube version"
+  ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    minikube version --short 2>/dev/null || minikube version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+' | head -n1 || echo "v0.0"
+  args:
+    executable: /bin/bash
+  register: mk_ver_out
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Install or upgrade multi-arch Minikube (>= v1.30)"
+  ansible.builtin.get_url:
+    url: "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-{{ cli_arch }}"
+    dest: /usr/local/bin/minikube
+    mode: "0755"
+    force: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - "'MISSING:minikube' in cli_audit_ubuntu.stdout or ((mk_ver_out.stdout | trim | regex_replace('^v', '')) is version('1.30', '<'))"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Install Helm v3 and Testkube CLI if missing"
+  ansible.builtin.shell: |
+    set -e
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export HELM_INSTALL_DIR="/usr/local/bin"
+    if ! command -v helm >/dev/null 2>&1 && [ ! -f /usr/local/bin/helm ]; then
+      if command -v openssl >/dev/null 2>&1; then
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | PATH="/usr/local/bin:/usr/local/sbin:$PATH" bash
+      else
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | PATH="/usr/local/bin:/usr/local/sbin:$PATH" VERIFY_CHECKSUM=false bash
+      fi
+    fi
+    if ! command -v testkube >/dev/null 2>&1 && [ ! -f /usr/local/bin/testkube ]; then
+      TK_VER="{{ testkube_cli_version | default('latest') }}"
+      if [ "$TK_VER" = "latest" ]; then
+        TK_VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/kubeshop/testkube/releases/latest 2>/dev/null | awk -F/ '{print $NF}' | tr -d 'v' || echo "")
+      fi
+      if [ -n "$TK_VER" ]; then
+        export TESTKUBE_VERSION="$TK_VER"
+      fi
+      curl -sSLf https://get.testkube.io | PATH="/usr/local/bin:/usr/local/sbin:$PATH" bash
+    fi
+  args:
+    executable: /bin/bash
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  changed_when: true
+  when:
+    - "'MISSING:helm' in cli_audit_ubuntu.stdout or 'MISSING:testkube' in cli_audit_ubuntu.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Install Docker CE via apt if missing"
+  ansible.builtin.apt:
+    name: [docker.io, containerd]
+    state: present
+    update_cache: yes
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - "'MISSING:docker' in cli_audit_ubuntu.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Enable and start Docker service"
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Add invoking user to docker group (secure group membership)"
+  ansible.builtin.user:
+    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_user_id, true) }}"
+    groups: docker
+    append: yes
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Verify Docker container runtime is available on host"
+  ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    if ! command -v docker >/dev/null 2>&1; then
+      echo "ERROR: Docker runtime is required by Minikube (--driver=docker) but 'docker' was not found in PATH."
+      echo "Please install Docker on this host: 'sudo apt-get install -y docker.io containerd'."
+      exit 1
+    fi
+    if docker info >/dev/null 2>&1; then
+      echo "Docker daemon is active and accessible."
+    elif command -v sg >/dev/null 2>&1 && sg docker -c "docker info" >/dev/null 2>&1; then
+      echo "Docker daemon is active and accessible via docker group."
+    elif [ "$(id -u)" -eq 0 ] || sudo -n docker info >/dev/null 2>&1; then
+      echo "Docker daemon is active and accessible via sudo."
+    else
+      echo "ERROR: Docker daemon is not active or accessible by user '$(whoami)'."
+      echo "Please start Docker service ('sudo systemctl start docker') and verify user belongs to the 'docker' group ('sudo usermod -aG docker $(whoami)')."
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - not (dry_run_mode | bool)
+    - not (preflight_only_mode | default(false) | bool)
+  tags: [host-prep]

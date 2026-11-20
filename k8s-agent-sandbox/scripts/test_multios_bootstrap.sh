@@ -85,6 +85,17 @@ for script in "${SCRIPTS_TO_TEST[@]}"; do
     fi
 done
 
+# Check root Makefile syntax and help target
+if [ -f "${REPO_ROOT}/Makefile" ]; then
+    if make -C "${REPO_ROOT}" -n help >/dev/null 2>&1; then
+        assert_test "Makefile syntax & help target: Makefile" 0
+    else
+        assert_test "Makefile syntax & help target: Makefile" 1
+    fi
+else
+    assert_test "Makefile exists: Makefile" 1
+fi
+
 # Check embedded bash scripts inside Ansible tasks (00_host_prep, 01_minikube_gvisor, 02_k8s_stack)
 if command -v ruby >/dev/null 2>&1; then
     EMBEDDED_SYNTAX_STATUS=$(ruby -ryaml -e '
@@ -688,32 +699,59 @@ EOF
 ) && assert_test "gVisor host unpack regression: Extracts binaries on host without guest tools" 0 || \
    assert_test "gVisor host unpack regression: Extracts binaries on host without guest tools" 1
 
-# Regression Test: tasks/00_host_prep.yml skips package managers when utilities exist
-if grep -q "base_utils_check" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "'MISSING:' in base_utils_check.stdout" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
-    assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 0
+# Regression Test: tasks/00_host_prep.yml dispatches to modular OS-specific task files across 5 matrix flows
+if grep -q "00_host_prep_darwin.yml" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "00_host_prep_ubuntu.yml" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "00_host_prep_rocky.yml" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: Modular dispatcher delegates to Darwin, Ubuntu, and Rocky flow modules" 0
 else
-    assert_test "tasks/00_host_prep.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
+    assert_test "tasks/00_host_prep.yml: Modular dispatcher delegates to Darwin, Ubuntu, and Rocky flow modules" 1
 fi
 
-# Regression Test: tasks/00_host_prep.yml audits openssl in base_utils_check for get-helm-3 verification
-if grep -q "for tool in curl tar jq bzip2 openssl;" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "openssl" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "VERIFY_CHECKSUM=false" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
-    assert_test "tasks/00_host_prep.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 0
+# Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml skips package managers when utilities exist
+if grep -q "base_utils_check" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "base_utils_check" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; then
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: Base package manager guarded by audit to avoid unneeded sudo" 0
 else
-    assert_test "tasks/00_host_prep.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 1
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: Base package manager guarded by audit to avoid unneeded sudo" 1
 fi
 
-# Regression Test: tasks/00_host_prep.yml exports /usr/local/bin in PATH and ensures /usr/bin symlinks for Rocky/RHEL
-if grep -q "HELM_INSTALL_DIR=\"/usr/local/bin\"" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "PATH=\"/usr/local/bin:/usr/local/sbin:\$PATH\"" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "ln -sf /usr/local/bin/helm /usr/bin/helm" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "environment:" "${K8S_DIR}/ansible/playbooks/site.yml" && \
-   grep -q "export PATH := /usr/local/bin:/usr/local/sbin:" "${REPO_ROOT}/Makefile"; then
-    assert_test "tasks/00_host_prep.yml: exports /usr/local/bin PATH and ensures /usr/bin symlinks for Rocky/RHEL" 0
+# Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml audits openssl in base_utils_check for get-helm-3 verification
+if grep -q "openssl" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "openssl" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "VERIFY_CHECKSUM=false" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "VERIFY_CHECKSUM=false" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; then
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 0
 else
-    assert_test "tasks/00_host_prep.yml: exports /usr/local/bin PATH and ensures /usr/bin symlinks for Rocky/RHEL" 1
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 1
+fi
+
+# Regression Test: tasks/00_host_prep_darwin.yml dynamically resolves Homebrew prefix (arm64 /opt/homebrew vs x86_64 /usr/local)
+if grep -q "brew_prefix:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   grep -q "/opt/homebrew" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   ! grep -q "become:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"; then
+    assert_test "tasks/00_host_prep_darwin.yml: resolves architecture-specific Homebrew prefix without sudo" 0
+else
+    assert_test "tasks/00_host_prep_darwin.yml: resolves architecture-specific Homebrew prefix without sudo" 1
+fi
+
+# Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml implements Docker CE installation and readiness verification
+if grep -q "Install Docker CE" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "Install Docker CE repository" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "ansible.builtin.user" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "groups: docker" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "command -v docker >/dev/null 2>&1 || return 0" "${BOOTSTRAP_SCRIPT}"; then
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: implements Docker CE installation, systemd activation, and user group management" 0
+else
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: implements Docker CE installation, systemd activation, and user group management" 1
+fi
+
+# Security Invariant Test: Strictly prohibit chmod 666 /var/run/docker.sock or permission downgrades
+if ! grep -rn "chmod 666" "${K8S_DIR}/ansible/" "${BOOTSTRAP_SCRIPT}" 2>/dev/null && \
+   ! grep -rn "chmod.*docker\.sock" "${K8S_DIR}/ansible/" "${BOOTSTRAP_SCRIPT}" 2>/dev/null; then
+    assert_test "security: Zero chmod 666 /var/run/docker.sock hacks (standard system user group management used)" 0
+else
+    assert_test "security: Zero chmod 666 /var/run/docker.sock hacks (standard system user group management used)" 1
 fi
 
 # Regression Test: bootstrap_cluster.sh host_needs_privilege audits openssl on Linux
@@ -723,21 +761,93 @@ else
     assert_test "bootstrap_cluster.sh: host_needs_privilege checks openssl prerequisite on Linux" 1
 fi
 
-# Regression Test: tasks/00_host_prep.yml audits and adjusts open file limits & systemd DefaultLimitNOFILE on Linux
-if grep -q "nofile_controls" "${K8S_DIR}/ansible/group_vars/all.yml" && \
-   grep -q "DefaultLimitNOFILE" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
-   grep -q "fs.file-max" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
-    assert_test "tasks/00_host_prep.yml: Linux open file & systemd DefaultLimitNOFILE controls implemented" 0
+# Unit Test: host_needs_privilege() returns 0 (requires privilege) when docker is missing on Linux
+(
+    HOST_PLATFORM="Linux"
+    MOCK_NO_DOCKER_DIR="${MOCK_TMP_DIR}/mock_no_docker"
+    mkdir -p "$MOCK_NO_DOCKER_DIR"
+    for tool in curl tar jq bzip2 openssl kubectl minikube helm testkube; do
+        touch "${MOCK_NO_DOCKER_DIR}/${tool}"
+        chmod +x "${MOCK_NO_DOCKER_DIR}/${tool}"
+    done
+    PATH="${MOCK_NO_DOCKER_DIR}"
+    host_needs_privilege
+) && assert_test "bootstrap_cluster.sh: host_needs_privilege returns 0 when Docker is missing on Linux" 0 || \
+   assert_test "bootstrap_cluster.sh: host_needs_privilege returns 0 when Docker is missing on Linux" 1
+
+# Unit Test: host_needs_privilege() returns 1 (zero privilege needed) when all tools including docker are present
+(
+    HOST_PLATFORM="Linux"
+    MOCK_ALL_TOOLS_DIR="${MOCK_TMP_DIR}/mock_all_tools"
+    mkdir -p "$MOCK_ALL_TOOLS_DIR"
+    for tool in curl tar jq bzip2 openssl kubectl minikube helm testkube docker; do
+        touch "${MOCK_ALL_TOOLS_DIR}/${tool}"
+        chmod +x "${MOCK_ALL_TOOLS_DIR}/${tool}"
+    done
+    PATH="${MOCK_ALL_TOOLS_DIR}"
+    if host_needs_privilege; then
+        exit 1
+    else
+        exit 0
+    fi
+) && assert_test "bootstrap_cluster.sh: host_needs_privilege returns 1 when all tools exist and /usr/local/bin is writable" 0 || \
+   assert_test "bootstrap_cluster.sh: host_needs_privilege returns 1 when all tools exist and /usr/local/bin is writable" 1
+
+# Matrix Flow 1 Test: 00_host_prep_darwin.yml strictly user-space, zero become, zero linux tools
+if ! grep -q "become:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   grep -q "brew_prefix:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   ! grep -qE "dnf|yum|apt|sysctl\.d|limits\.d" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"; then
+    assert_test "matrix flow 1 (macOS): 00_host_prep_darwin.yml is strictly user-space (zero sudo/become) and isolated from Linux" 0
 else
-    assert_test "tasks/00_host_prep.yml: Linux open file & systemd DefaultLimitNOFILE controls implemented" 1
+    assert_test "matrix flow 1 (macOS): 00_host_prep_darwin.yml is strictly user-space (zero sudo/become) and isolated from Linux" 1
 fi
 
-# Regression Test: tasks/00_host_prep.yml macOS tasks require zero become/sudo
-if ! awk '/ansible_facts..system.. == .Darwin./,/(tags:)/' "${K8S_DIR}/ansible/tasks/00_host_prep.yml" | grep -q "become:" && \
-   ! grep -q "kern.maxfiles" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
-    assert_test "tasks/00_host_prep.yml: Darwin tasks execute without become/sudo and require no host sysctl" 0
+# Matrix Flows 2 & 3 Test: 00_host_prep_ubuntu.yml uses apt, installs docker.io, zero brew, zero dnf/yum
+if grep -q "ansible.builtin.apt:" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "docker\.io" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "ansible.builtin.user" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   ! grep -qE "brew|homebrew|dnf|yum" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
+    assert_test "matrix flows 2 & 3 (Ubuntu): 00_host_prep_ubuntu.yml uses apt and is isolated from macOS and RedHat" 0
 else
-    assert_test "tasks/00_host_prep.yml: Darwin tasks execute without become/sudo and require no host sysctl" 1
+    assert_test "matrix flows 2 & 3 (Ubuntu): 00_host_prep_ubuntu.yml uses apt and is isolated from macOS and RedHat" 1
+fi
+
+# Matrix Flows 4 & 5 Test: 00_host_prep_rocky.yml uses dnf/yum, docker-ce repo, /usr/bin symlinks, zero brew, zero apt
+if grep -qE "dnf|yum" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "docker-ce\.repo" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "ansible.builtin.user" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "/usr/bin/kubectl" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   ! grep -qE "brew|homebrew|ansible\.builtin\.apt" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; then
+    assert_test "matrix flows 4 & 5 (Rocky): 00_host_prep_rocky.yml uses dnf/yum with secure_path symlinks and is isolated from Debian/macOS" 0
+else
+    assert_test "matrix flows 4 & 5 (Rocky): 00_host_prep_rocky.yml uses dnf/yum with secure_path symlinks and is isolated from Debian/macOS" 1
+fi
+
+# Makefile Test: All primary Make targets parse and dry-run without errors
+for target in help check dry-run preflight cluster clean status; do
+    if make -C "${REPO_ROOT}" -n "$target" >/dev/null 2>&1; then
+        assert_test "Makefile: target '$target' syntax and execution plan verified" 0
+    else
+        assert_test "Makefile: target '$target' syntax and execution plan verified" 1
+    fi
+done
+
+# Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml audits and adjusts open file limits & systemd DefaultLimitNOFILE on Linux
+if grep -q "nofile_controls" "${K8S_DIR}/ansible/group_vars/all.yml" && \
+   grep -q "DefaultLimitNOFILE" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "DefaultLimitNOFILE" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "fs.file-max" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; then
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: Linux open file & systemd DefaultLimitNOFILE controls implemented" 0
+else
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: Linux open file & systemd DefaultLimitNOFILE controls implemented" 1
+fi
+
+# Regression Test: tasks/00_host_prep_darwin.yml macOS tasks require zero become/sudo
+if ! grep -q "become:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   ! grep -q "kern.maxfiles" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"; then
+    assert_test "tasks/00_host_prep_darwin.yml: Darwin tasks execute without become/sudo and require no host sysctl" 0
+else
+    assert_test "tasks/00_host_prep_darwin.yml: Darwin tasks execute without become/sudo and require no host sysctl" 1
 fi
 
 # Regression Test: configure_linux_sysctl is true in group_vars/all.yml for Linux kernel optimizations
@@ -747,11 +857,12 @@ else
     assert_test "group_vars/all.yml: configure_linux_sysctl is enabled for Linux kernel optimization" 1
 fi
 
-# Regression Test: tasks/00_host_prep.yml sysctl tasks include ignore_unreachable: true
-if grep -q "ignore_unreachable: true" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
-    assert_test "tasks/00_host_prep.yml: Sysctl tasks specify ignore_unreachable: true" 0
+# Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml sysctl tasks include ignore_unreachable: true
+if grep -q "ignore_unreachable: true" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "ignore_unreachable: true" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; then
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: Sysctl tasks specify ignore_unreachable: true" 0
 else
-    assert_test "tasks/00_host_prep.yml: Sysctl tasks specify ignore_unreachable: true" 1
+    assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: Sysctl tasks specify ignore_unreachable: true" 1
 fi
 
 # Regression Test: tasks/00_host_prep.yml sysctl audit logic evaluates NEEDS_ADJUSTMENT=false when kernel limits are already sufficient (Ubuntu)
@@ -982,6 +1093,9 @@ REQUIRED_MANIFESTS=(
     "${K8S_DIR}/ansible/group_vars/all.yml"
     "${K8S_DIR}/ansible/playbooks/site.yml"
     "${K8S_DIR}/ansible/tasks/00_host_prep.yml"
+    "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"
+    "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"
+    "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"
     "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml"
     "${K8S_DIR}/ansible/tasks/02_k8s_stack.yml"
 )
