@@ -2,6 +2,8 @@
 # Cluster Sizing & Runtime Configuration
 minikube_cpus: 4
 minikube_memory_mb: 8192
+effective_cpus: 4
+effective_memory_mb: 8192
 minikube_custom_memory_mb: ""
 minikube_ci_mode: false
 minikube_driver: docker

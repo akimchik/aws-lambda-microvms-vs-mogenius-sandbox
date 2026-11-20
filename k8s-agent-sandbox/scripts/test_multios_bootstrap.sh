@@ -1102,6 +1102,14 @@ else
     assert_test "tasks/01_minikube_gvisor.yml: sizing variables declare defensive defaults for isolated tag execution" 1
 fi
 
+# Regression Test: tasks/01_minikube_gvisor.yml sizing tasks are never skipped by --skip-tags preflight
+if ! grep -q "preflight" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+   grep -q "effective_cpus:" "${K8S_DIR}/ansible/group_vars/all.yml"; then
+    assert_test "tasks/01_minikube_gvisor.yml: sizing tasks are not tagged preflight and have group_vars fallback" 0
+else
+    assert_test "tasks/01_minikube_gvisor.yml: sizing tasks are not tagged preflight and have group_vars fallback" 1
+fi
+
 # ==============================================================================
 # [5/6] Multi-Arch Binary Download URLs & Live Network Reachability (if online)
 # ==============================================================================

@@ -5,7 +5,7 @@
   changed_when: false
   failed_when: false
   check_mode: false
-  tags: [always, preflight, minikube]
+  tags: [always, minikube, sizing]
 
 - name: "[1/8] Compute effective memory ceiling and auto-clamp if < 8192 MB"
   ansible.builtin.set_fact:
@@ -15,7 +15,7 @@
         if (docker_mem_raw.rc == 0 and (docker_mem_raw.stdout | trim | int) > 0)
         else (ansible_facts['memtotal_mb'] | default(8192) | int)
       }}
-  tags: [always, preflight, minikube]
+  tags: [always, minikube, sizing]
 
 - name: "[1/8] Determine final Minikube primary node CPUs and Memory (MB)"
   ansible.builtin.set_fact:
@@ -32,18 +32,18 @@
           )
         )
       }}
-  tags: [always, preflight, minikube]
+  tags: [always, minikube, sizing]
 
 - name: "[1/8] Report computed Minikube sizing"
   ansible.builtin.debug:
     msg: "Docker/Host Memory Ceiling={{ detected_mem_mb }} MB -> Target Minikube Sizing: {{ effective_cpus }} vCPUs, {{ effective_memory_mb }} MB RAM"
-  tags: [always, preflight, minikube]
+  tags: [always, minikube, sizing]
 
 - name: "[1/8] Ensure Minikube primary node and dedicated worker '{{ minikube_worker_node }}' are running and tainted"
   ansible.builtin.shell: |
     set -euo pipefail
     if ! minikube status >/dev/null 2>&1; then
-      minikube start --driver={{ minikube_driver }} --container-runtime={{ minikube_container_runtime }} --cpus={{ effective_cpus }} --memory={{ effective_memory_mb }}
+      minikube start --driver={{ minikube_driver }} --container-runtime={{ minikube_container_runtime }} --cpus={{ effective_cpus | default(minikube_cpus | default(4)) }} --memory={{ effective_memory_mb | default(minikube_memory_mb | default(8192)) }}
     fi
     if ! kubectl get node {{ minikube_worker_node }} >/dev/null 2>&1; then
       minikube node add --worker=true
