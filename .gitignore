@@ -2,3 +2,4 @@ ci-demo/
 aws-lambda-microvms/ci-demo/
 __pycache__/
 *.pyc
+.agents/
