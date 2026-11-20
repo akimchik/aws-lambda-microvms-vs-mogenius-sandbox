@@ -587,10 +587,10 @@ fi
 ) && assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 0 || \
    assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 1
 
-# Regression Test: prime_sudo() skips sudo -v when SUDO_NEEDS_PASS=true to avoid double password prompt and TTY masking
+# Regression Test: prime_sudo() skips sudo -v when FORCE_ASK_BECOME=true to avoid double password prompt and TTY masking
 (
     HOST_PLATFORM="Linux"
-    SUDO_NEEDS_PASS=true
+    FORCE_ASK_BECOME=true
     MOCK_SUDO_V_DIR="${MOCK_TMP_DIR}/mock_sudo_v_fail"
     mkdir -p "$MOCK_SUDO_V_DIR"
     cat << 'EOF' > "${MOCK_SUDO_V_DIR}/sudo"
@@ -605,8 +605,30 @@ EOF
     PATH="${MOCK_SUDO_V_DIR}:${PATH}"
     # prime_sudo should exit 0 without invoking sudo -v
     prime_sudo
-) && assert_test "prime_sudo(): Skips sudo -v when SUDO_NEEDS_PASS=true to avoid double password prompt" 0 || \
-   assert_test "prime_sudo(): Skips sudo -v when SUDO_NEEDS_PASS=true to avoid double password prompt" 1
+) && assert_test "prime_sudo(): Skips sudo -v when FORCE_ASK_BECOME=true to avoid double password prompt" 0 || \
+   assert_test "prime_sudo(): Skips sudo -v when FORCE_ASK_BECOME=true to avoid double password prompt" 1
+
+# Regression Test: prime_sudo() skips sudo -v when host_needs_privilege evaluates to false
+(
+    HOST_PLATFORM="Linux"
+    FORCE_ASK_BECOME=false
+    # Mock host_needs_privilege to return 1 (false: no host tools missing)
+    host_needs_privilege() { return 1; }
+    MOCK_SUDO_V_DIR2="${MOCK_TMP_DIR}/mock_sudo_v_fail2"
+    mkdir -p "$MOCK_SUDO_V_DIR2"
+    cat << 'EOF' > "${MOCK_SUDO_V_DIR2}/sudo"
+#!/bin/sh
+if [ "$1" = "-v" ]; then
+    echo "ERROR: sudo -v should not have been called!" >&2
+    exit 99
+fi
+exit 1
+EOF
+    chmod +x "${MOCK_SUDO_V_DIR2}/sudo"
+    PATH="${MOCK_SUDO_V_DIR2}:${PATH}"
+    prime_sudo
+) && assert_test "prime_sudo(): Skips sudo -v when host_needs_privilege evaluates to false" 0 || \
+   assert_test "prime_sudo(): Skips sudo -v when host_needs_privilege evaluates to false" 1
 
 # Regression Test: prime_sudo() immediately exits on macOS
 (
