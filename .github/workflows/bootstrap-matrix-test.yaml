@@ -96,7 +96,7 @@ jobs:
     steps:
       - name: Install Base Utilities (git, bash, tar, bzip2, ruby/python, ansible)
         run: |
-          dnf install -y --allowerasing git bash tar bzip2 findutils sudo ruby python3-pyyaml ansible-core || dnf install -y --allowerasing git bash tar bzip2 findutils sudo ruby python3-pyyaml
+          dnf install -y --allowerasing make git bash tar bzip2 findutils sudo ruby python3-pyyaml ansible-core || dnf install -y --allowerasing make git bash tar bzip2 findutils sudo ruby python3-pyyaml
 
       - name: Checkout Codebase
         uses: actions/checkout@v4
