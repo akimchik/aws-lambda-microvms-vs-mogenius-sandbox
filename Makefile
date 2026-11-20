@@ -4,6 +4,8 @@
 # Provides fast static checks (zero VM spin-up) vs. full cluster reconciliation.
 # ==============================================================================
 
+export PATH := /usr/local/bin:/usr/local/sbin:$(PATH)
+
 .PHONY: all help test check dry-run preflight cluster bootstrap clean status test-security test-benchmark test-load
 
 # Default: Fast verification without spinning up VMs

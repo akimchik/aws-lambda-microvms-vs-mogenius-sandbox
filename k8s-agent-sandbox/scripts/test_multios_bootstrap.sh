@@ -705,6 +705,17 @@ else
     assert_test "tasks/00_host_prep.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 1
 fi
 
+# Regression Test: tasks/00_host_prep.yml exports /usr/local/bin in PATH and ensures /usr/bin symlinks for Rocky/RHEL
+if grep -q "HELM_INSTALL_DIR=\"/usr/local/bin\"" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "PATH=\"/usr/local/bin:/usr/local/sbin:\$PATH\"" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "ln -sf /usr/local/bin/helm /usr/bin/helm" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" && \
+   grep -q "environment:" "${K8S_DIR}/ansible/playbooks/site.yml" && \
+   grep -q "export PATH := /usr/local/bin:/usr/local/sbin:" "${REPO_ROOT}/Makefile"; then
+    assert_test "tasks/00_host_prep.yml: exports /usr/local/bin PATH and ensures /usr/bin symlinks for Rocky/RHEL" 0
+else
+    assert_test "tasks/00_host_prep.yml: exports /usr/local/bin PATH and ensures /usr/bin symlinks for Rocky/RHEL" 1
+fi
+
 # Regression Test: bootstrap_cluster.sh host_needs_privilege audits openssl on Linux
 if grep -q "for tool in curl tar jq bzip2 openssl;" "${BOOTSTRAP_SCRIPT}"; then
     assert_test "bootstrap_cluster.sh: host_needs_privilege checks openssl prerequisite on Linux" 0

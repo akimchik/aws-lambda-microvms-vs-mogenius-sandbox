@@ -19,6 +19,7 @@
 
 - name: "[0/8] Check if base utilities are installed (curl, tar, jq, bzip2, openssl)"
   ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
     for tool in curl tar jq bzip2 openssl; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "MISSING:$tool"
@@ -223,6 +224,7 @@
 
 - name: "[0/8] Audit host CLI tools (kubectl, minikube, helm, testkube, docker)"
   ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
     for tool in kubectl minikube helm testkube docker; do
       if command -v "$tool" >/dev/null 2>&1; then
         echo "PRESENT:$tool:$(command -v "$tool")"
@@ -256,12 +258,14 @@
 - name: "[0/8] Install multi-arch kubectl on Linux if missing"
   ansible.builtin.shell: |
     set -e
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
     K8S_VER="{{ kubectl_version | default('latest') }}"
     if [ "$K8S_VER" = "latest" ]; then
       K8S_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo "{{ k8s_fallback_version }}")
     fi
     curl -fsSL "https://dl.k8s.io/release/${K8S_VER}/bin/linux/{{ cli_arch }}/kubectl" -o /usr/local/bin/kubectl
     chmod 0755 /usr/local/bin/kubectl
+    [ -f /usr/local/bin/kubectl ] && [ ! -f /usr/bin/kubectl ] && [ -d /usr/bin ] && [ -w /usr/bin ] && ln -sf /usr/local/bin/kubectl /usr/bin/kubectl 2>/dev/null || true
   args:
     executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
@@ -274,6 +278,7 @@
 
 - name: "[0/8] Check installed Minikube version"
   ansible.builtin.shell: |
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
     minikube version --short 2>/dev/null || minikube version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+' | head -n1 || echo "v0.0"
   args:
     executable: /bin/bash
@@ -295,10 +300,24 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8] Ensure /usr/bin symlink for Minikube on Linux"
+  ansible.builtin.shell: |
+    [ -f /usr/local/bin/minikube ] && [ ! -f /usr/bin/minikube ] && [ -d /usr/bin ] && [ -w /usr/bin ] && ln -sf /usr/local/bin/minikube /usr/bin/minikube 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  changed_when: false
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
 - name: "[0/8] Install Helm v3 and Testkube CLI on Linux if missing"
   ansible.builtin.shell: |
     set -e
-    if ! command -v helm >/dev/null 2>&1; then
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export HELM_INSTALL_DIR="/usr/local/bin"
+    if ! command -v helm >/dev/null 2>&1 && [ ! -f /usr/local/bin/helm ] && [ ! -f /usr/bin/helm ]; then
       if ! command -v openssl >/dev/null 2>&1; then
         if command -v dnf >/dev/null 2>&1; then
           dnf install -y openssl 2>/dev/null || true
@@ -309,12 +328,15 @@
         fi
       fi
       if command -v openssl >/dev/null 2>&1; then
-        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | PATH="/usr/local/bin:/usr/local/sbin:$PATH" bash
       else
-        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | VERIFY_CHECKSUM=false bash
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | PATH="/usr/local/bin:/usr/local/sbin:$PATH" VERIFY_CHECKSUM=false bash
       fi
     fi
-    if ! command -v testkube >/dev/null 2>&1; then
+    if [ -f /usr/local/bin/helm ] && [ ! -f /usr/bin/helm ] && [ -d /usr/bin ] && [ -w /usr/bin ]; then
+      ln -sf /usr/local/bin/helm /usr/bin/helm 2>/dev/null || true
+    fi
+    if ! command -v testkube >/dev/null 2>&1 && [ ! -f /usr/local/bin/testkube ] && [ ! -f /usr/bin/testkube ]; then
       TK_VER="{{ testkube_cli_version | default('latest') }}"
       if [ "$TK_VER" = "latest" ]; then
         # Resolve latest tag via HTTP redirect header to bypass anonymous GitHub API rate limits
@@ -323,7 +345,10 @@
       if [ -n "$TK_VER" ]; then
         export TESTKUBE_VERSION="$TK_VER"
       fi
-      curl -sSLf https://get.testkube.io | bash
+      curl -sSLf https://get.testkube.io | PATH="/usr/local/bin:/usr/local/sbin:$PATH" bash
+    fi
+    if [ -f /usr/local/bin/testkube ] && [ ! -f /usr/bin/testkube ] && [ -d /usr/bin ] && [ -w /usr/bin ]; then
+      ln -sf /usr/local/bin/testkube /usr/bin/testkube 2>/dev/null || true
     fi
   args:
     executable: /bin/bash
@@ -334,3 +359,21 @@
     - "'MISSING:helm' in cli_audit.stdout or 'MISSING:testkube' in cli_audit.stdout"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
+
+- name: "[0/8] Ensure /usr/local/bin is in global environment on Linux"
+  ansible.builtin.copy:
+    dest: /etc/profile.d/00-local-bin.sh
+    mode: "0644"
+    content: |
+      # Ensure /usr/local/bin and /usr/local/sbin are always on PATH
+      case ":$PATH:" in
+        *":/usr/local/bin:"*) ;;
+        *) export PATH="/usr/local/bin:/usr/local/sbin:$PATH" ;;
+      esac
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  ignore_unreachable: true
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - not (dry_run_mode | bool)
+  tags: [host-prep, preflight]

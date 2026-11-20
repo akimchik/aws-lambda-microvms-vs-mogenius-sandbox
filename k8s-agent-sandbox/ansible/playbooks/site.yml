@@ -2,6 +2,8 @@
 - name: Provision & Reconcile Multi-OS 2-Node Kubernetes Agent Sandbox Platform (gVisor + mogenius + Testkube)
   hosts: all
   gather_facts: true
+  environment:
+    PATH: "/usr/local/bin:/usr/local/sbin:{{ ansible_facts['env']['PATH'] | default('/usr/bin:/bin') }}"
   tasks:
     - name: "[Stage 0] Host OS, Kernel Sysctl & Toolchain Preparation"
       ansible.builtin.import_tasks: ../tasks/00_host_prep.yml
