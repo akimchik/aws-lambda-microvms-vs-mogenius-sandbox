@@ -30,6 +30,7 @@ help:
 	@echo ""
 	@echo "Options:"
 	@echo "  Pass ARGS='<flags>' to forward CLI options (e.g., make cluster ARGS='-K' or make preflight ARGS='--memory 4096')"
+	@echo "  Pass DURATION='<time>' QPS='<rate>' TARGET_URL='<url>' to test targets (e.g., make test-load DURATION=2m QPS=100)"
 
 # Fast verification: syntax, YAML schemas, and unit tests (Zero VM spinup)
 test check:

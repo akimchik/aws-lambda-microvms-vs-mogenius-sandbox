@@ -96,10 +96,10 @@ To avoid having to type long nested script paths or memorize CLI flags, the root
 | **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) | ⚠️ Only if missing |
 | **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) | ❌ No (User space) |
 | **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods | ❌ No |
-| **Teardown** | `make clean` | `minikube delete -p minikube` | Deletes local Minikube cluster nodes | ❌ No |
-| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (10 VUs) | ❌ No |
-| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark | ❌ No |
-| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test | ❌ No |
+| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows | ❌ No |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) | ❌ No |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) | ❌ No |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) | ❌ No |
 
 ### 🔧 CLI Flag Reference (`bootstrap_cluster.sh`)
 
@@ -521,17 +521,19 @@ WSL 2 automatically forwards networking to Windows:
 
 ## 🧪 Validating the Platform (All Operating Systems)
 
-Once `bootstrap_cluster.sh` finishes with `Cluster is 100% CONVERGED, HEALTHY & READY!`, trigger the automated benchmarks and security probes on worker node `minikube-m02`:
+Once `make cluster` (`bootstrap_cluster.sh`) finishes with `Cluster is 100% CONVERGED, HEALTHY & READY!` (having dynamically captured `minikube ip` and rendered the Testkube workflow templates in `k8s-agent-sandbox/testkube/templates/*.yaml.j2`), trigger the automated benchmarks and security probes on worker node `minikube-m02` via `make`:
 
 ```bash
 # 1. Run the 60 QPS Ingress & Warm-Pool Latency Benchmark
-testkube run tw agent-sandbox-benchmark -f
+make test-benchmark
+# (Or override duration & QPS: make test-benchmark DURATION=30s QPS=80)
 
 # 2. Run the Continuous Red-Team Security Audit (gVisor T1-T6 Probe + k6 SSRF Fuzzer)
-testkube run tw agent-sandbox-security-audit -f
+make test-security
+# (Or override duration: make test-security DURATION=1m)
 
-# 3. Run the High-Throughput Sustained Load Benchmark (70 RPS / 10,500 requests)
-testkube run tw agent-sandbox-sustained-load -f
+# 3. Run the High-Throughput Sustained Load Benchmark (default 70 RPS / 150s, or custom 2-minute run)
+make test-load DURATION=2m QPS=100
 
 # 4. View execution history
 testkube get twe

@@ -278,8 +278,9 @@ All code, manifests, and raw outputs from this benchmark are open-source and ava
 
 - **Red-Team Threat Probe:** [`k8s-agent-sandbox/threat-model/threat_probe.py`](../k8s-agent-sandbox/threat-model/threat_probe.py)
 - **Egress & Credential Broker:** [`k8s-agent-sandbox/threat-model/egress-broker.yaml`](../k8s-agent-sandbox/threat-model/egress-broker.yaml)
-- **Testkube Security Audit Workflow:** [`k8s-agent-sandbox/testkube/test-workflow-security.yaml`](../k8s-agent-sandbox/testkube/test-workflow-security.yaml)
-- **Testkube 60 QPS Performance Workflow:** [`k8s-agent-sandbox/testkube/test-workflow.yaml`](../k8s-agent-sandbox/testkube/test-workflow.yaml)
+- **Testkube Security Audit Workflow Template:** [`k8s-agent-sandbox/testkube/templates/test-workflow-security.yaml.j2`](../k8s-agent-sandbox/testkube/templates/test-workflow-security.yaml.j2)
+- **Testkube 60 QPS Performance Workflow Template:** [`k8s-agent-sandbox/testkube/templates/test-workflow.yaml.j2`](../k8s-agent-sandbox/testkube/templates/test-workflow.yaml.j2)
+- **Testkube 70 RPS Sustained Load Workflow Template:** [`k8s-agent-sandbox/testkube/templates/test-workflow-sustained-load.yaml.j2`](../k8s-agent-sandbox/testkube/templates/test-workflow-sustained-load.yaml.j2)
 - **k6 Security Fuzzing Suite:** [`k8s-agent-sandbox/testkube/tests/k6-security-audit.js`](../k8s-agent-sandbox/testkube/tests/k6-security-audit.js)
 - **Dedicated Testkube Grafana Dashboard:** [`k8s-agent-sandbox/monitoring/grafana-dashboard-testkube.yaml`](../k8s-agent-sandbox/monitoring/grafana-dashboard-testkube.yaml)
 - **Baseline Probe Output:** [`k8s-agent-sandbox/threat-model/baseline_before_output.txt`](../k8s-agent-sandbox/threat-model/baseline_before_output.txt)

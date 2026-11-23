@@ -16,29 +16,32 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run the Ansible bootstrapper:
 
 ```bash
+# 0. Fast verification suite (131 unit, YAML & Jinja2 template rendering tests, zero VM spin-up)
+make check
+
 # 1. Non-mutating read-only audit (runs ansible-playbook --check --diff, 0 changes made)
-./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+make dry-run
 
 # 2. Host toolchain discovery & preflight setup only ([0/8])
-./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+make preflight
 
 # 3. Full 8-stage declarative cluster reconciliation via Ansible
-./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+make cluster
 
 # Or pass custom memory on 8 GB hosts/VMs to prevent RSRC_OVER_ALLOC_MEM:
-# ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 6144
+# make cluster ARGS="--memory 6144"
 # (Recommended: expand VM memory to 10 GB on host: VBoxManage modifyvm "<VM_NAME>" --memory 10240)
 ```
 
-The thin `bootstrap_cluster.sh` CLI wrapper delegates all 8 reconciliation layers to `k8s-agent-sandbox/ansible/playbooks/site.yml` (using zero-pip `ansible.builtin.*` modules):
-1. **Multi-Node Topology (`minikube` + `minikube-m02`):** Starts the control-plane node, adds the dedicated worker node `minikube-m02` if missing, and applies the `dedicated=testkube:NoSchedule` taint and labels.
+The root `Makefile` and `bootstrap_cluster.sh` CLI wrapper delegate all 8 reconciliation layers to `k8s-agent-sandbox/ansible/playbooks/site.yml` (using zero-pip `ansible.builtin.*` modules):
+1. **Multi-Node Topology (`minikube` + `minikube-m02`):** Starts the control-plane node, adds the dedicated worker node `minikube-m02` if missing, applies the `dedicated=testkube:NoSchedule` taint and labels, and dynamically captures the real `minikube ip` into the `minikube_ip` Ansible fact.
 2. **Host Resolution & Addon Cleanup:** Maps `control-plane.minikube.internal` in `/etc/hosts` and disables the legacy `gvisor` addon.
 3. **Native gVisor (`runsc`) Runtime:** Installs the official Google `runsc` binary inside the node if missing, deduplicates `/etc/containerd/config.toml`, restarts `containerd`, and registers `RuntimeClass: gvisor`.
 4. **NGINX Ingress Controller:** Enables and waits for `ingress-nginx-controller` readiness.
 5. **Observability Stack (`monitoring`):** Deploys `kube-prometheus-stack` via Helm and reconciles `monitoring-ingress.yaml` plus all 3 Grafana dashboards.
 6. **Agent Sandbox & Dynamic Router (`agent-sandbox-system` / `agent-sandbox`):** Deploys `mogenius-agent-sandbox` (`v1.2.1`), `sandbox-router`, `sandbox-ingress`, `ServiceMonitor`, and `sandbox-latency-exporter`.
 7. **Out-of-Sandbox Egress & Credential Broker (`sandbox-egress-system`):** Reconciles `egress-broker.yaml` and cross-namespace zero-trust `NetworkPolicy` rules.
-8. **Testkube OSS & Automated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), and registers all 3 TestWorkflows (`agent-sandbox-benchmark`, `agent-sandbox-security-audit`, and `agent-sandbox-sustained-load`).
+8. **Testkube OSS & Dynamic Templated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), renders the Jinja2 workflow templates (`k8s-agent-sandbox/testkube/templates/test-workflow*.yaml.j2`) with the dynamic `{{ minikube_ip }}`, and registers all 3 TestWorkflows (`agent-sandbox-benchmark`, `agent-sandbox-security-audit`, and `agent-sandbox-sustained-load`).
 
 ---
 
@@ -48,13 +51,16 @@ All load generation and security fuzzing workloads execute exclusively on the is
 
 ```bash
 # 1. Run the 60 QPS Ingress Performance & Warm Pool Claim Latency Benchmark (with scale-to-zero)
-testkube run tw agent-sandbox-benchmark -f
+make test-benchmark
+# (Or override parameters: make test-benchmark DURATION=30s QPS=80)
 
 # 2. Run the Continuous Red-Team Security Audit (In-Guest T1-T6 Probe + k6 Egress Broker Fuzzing)
-testkube run tw agent-sandbox-security-audit -f
+make test-security
+# (Or override duration: make test-security DURATION=1m)
 
-# 3. Run the High-Throughput Sustained Load Benchmark (70 RPS / 10,500 requests targeting active sandbox without restarts)
-testkube run tw agent-sandbox-sustained-load -f
+# 3. Run the High-Throughput Sustained Load Benchmark (70 RPS targeting active sandbox without restarts)
+make test-load
+# (Or custom 2-minute run: make test-load DURATION=2m QPS=100)
 
 # 4. Inspect past executions
 testkube get twe
