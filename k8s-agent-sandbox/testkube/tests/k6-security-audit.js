@@ -27,7 +27,12 @@ export const options = {
 };
 
 const BROKER_URL = __ENV.EGRESS_BROKER_URL || 'http://egress-broker.sandbox-egress-system.svc.cluster.local:8080';
-const INGRESS_URL = __ENV.TARGET_URL || 'http://192.168.49.2:80';
+const K8S_API_HOST = __ENV.KUBERNETES_SERVICE_HOST || '10.96.0.1';
+const K8S_API_PORT = __ENV.KUBERNETES_SERVICE_PORT || '443';
+const INGRESS_URL = __ENV.TARGET_URL;
+if (!INGRESS_URL) {
+  throw new Error('FATAL: TARGET_URL environment variable is required. Example: TARGET_URL=http://$(minikube ip):80 k6 run ...');
+}
 
 export default function () {
   const rand = Math.random();
@@ -44,9 +49,9 @@ export default function () {
 
   } else if (rand < 0.50) {
     // Vector 2: K8s API Control Plane Lateral Movement via Egress Broker (Must be 403 Blocked)
-    const res = http.get(`${BROKER_URL}/proxy?url=https://10.96.0.1:443/api/v1/namespaces/kube-system/secrets`);
+    const res = http.get(`${BROKER_URL}/proxy?url=https://${K8S_API_HOST}:${K8S_API_PORT}/api/v1/namespaces/kube-system/secrets`);
     const ok = check(res, {
-      '[T2-K8S-API] Broker blocks K8s API 10.96.0.1 with HTTP 403': (r) => r.status === 403,
+      '[T2-K8S-API] Broker blocks K8s API internal service IP with HTTP 403': (r) => r.status === 403,
     });
     securityPassRate.add(ok);
     brokerFilterLatency.add(res.timings.duration);

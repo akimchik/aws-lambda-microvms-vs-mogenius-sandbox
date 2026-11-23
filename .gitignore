@@ -2,3 +2,5 @@ ci-demo/
 aws-lambda-microvms/ci-demo/
 __pycache__/
 *.pyc
+.agents/
+k8s-agent-sandbox/testkube/test-workflow*.yaml

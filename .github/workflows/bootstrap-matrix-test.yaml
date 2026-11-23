@@ -3,8 +3,18 @@ name: Multi-OS & Multi-Architecture Bootstrap Matrix
 on:
   push:
     branches: [ "**" ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [ "main" ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   # ============================================================================
@@ -33,11 +43,11 @@ jobs:
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
-      - name: Install Test Utilities (Ruby / PyYAML)
+      - name: Install Test Utilities (Ruby / PyYAML / Ansible)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ruby python3-yaml
+          sudo apt-get install -y -qq ruby python3-yaml ansible-core || sudo apt-get install -y -qq ansible
 
       - name: Validate Shell Script Syntax (bash -n)
         run: |
@@ -53,6 +63,10 @@ jobs:
           if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --bogus-flag 2>/dev/null; then exit 1; fi
           if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 2>/dev/null; then exit 1; fi
           if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory abc 2>/dev/null; then exit 1; fi
+
+      - name: Run Read-Only Dry-Run Audit (--dry-run)
+        run: |
+          ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
 
       - name: Run Multi-OS & Multi-Arch Bootstrap Preflight Validation
         run: |
@@ -80,9 +94,9 @@ jobs:
     container:
       image: rockylinux:9
     steps:
-      - name: Install Base Utilities (git, bash, tar, bzip2, ruby/python)
+      - name: Install Base Utilities (git, bash, tar, bzip2, ruby/python, ansible)
         run: |
-          dnf install -y --allowerasing git bash tar bzip2 findutils sudo ruby python3-pyyaml
+          dnf install -y --allowerasing make git bash tar bzip2 findutils sudo ruby python3-pyyaml ansible-core || dnf install -y --allowerasing make git bash tar bzip2 findutils sudo ruby python3-pyyaml
 
       - name: Checkout Codebase
         uses: actions/checkout@v4
@@ -100,6 +114,10 @@ jobs:
           if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --bogus-flag 2>/dev/null; then exit 1; fi
           if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory 2>/dev/null; then exit 1; fi
           if ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --memory abc 2>/dev/null; then exit 1; fi
+
+      - name: Run Read-Only Dry-Run Audit on RHEL (--dry-run)
+        run: |
+          ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
 
       - name: Run Multi-OS & Multi-Arch Bootstrap Preflight Validation on RHEL (dnf)
         run: |

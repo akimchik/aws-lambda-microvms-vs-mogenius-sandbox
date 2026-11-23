@@ -24,7 +24,10 @@ export const options = {
   },
 };
 
-const BASE_URL = __ENV.TARGET_URL || 'http://192.168.49.2:80';
+const BASE_URL = __ENV.TARGET_URL;
+if (!BASE_URL) {
+  throw new Error('FATAL: TARGET_URL environment variable is required. Example: TARGET_URL=http://$(minikube ip):80 k6 run ...');
+}
 const SANDBOX_ID = __ENV.SANDBOX_ID;
 const SANDBOX_NAMESPACE = 'agent-sandbox';
 const SANDBOX_PORT = '8080';

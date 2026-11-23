@@ -35,8 +35,14 @@ This repository contains the end-to-end reference architectures, deployment mani
 │   └── cleanup.sh                       # Teardown script for AWS SAM stacks & MicroVMs
 │
 ├── k8s-agent-sandbox/                   # Kubernetes Agent Sandbox (mogenius + Google gVisor)
+│   ├── ansible/                         # Declarative ansible-core automation stack (zero pip/galaxy deps)
+│   │   ├── ansible.cfg                  # Sandboxed /tmp execution config (local_tmp/remote_tmp)
+│   │   ├── inventory.ini                # Localhost & remote VM inventory
+│   │   ├── group_vars/all.yml           # Cluster sizing, chart versions & sysctl params
+│   │   ├── playbooks/site.yml           # Unified multi-stage playbook
+│   │   └── tasks/                       # Modular tasks: 00_host_prep, 01_minikube_gvisor, 02_k8s_stack
 │   ├── scripts/
-│   │   ├── bootstrap_cluster.sh         # 8-stage idempotent cluster reconciler & self-healing bootstrapper
+│   │   ├── bootstrap_cluster.sh         # Thin CLI wrapper delegating to ansible-core (--dry-run vs --preflight-only)
 │   │   └── test_multios_bootstrap.sh    # Multi-OS & multi-arch integration test suite (sources reconciler)
 │   ├── helm/
 │   │   └── values-mogenius.yaml         # Helm values enabling gVisor RuntimeClass & NetworkPolicies
@@ -54,11 +60,12 @@ This repository contains the end-to-end reference architectures, deployment mani
 │   ├── testkube/
 │   │   ├── values-testkube.yaml         # Helm values pinning Testkube OSS strictly to worker node minikube-m02
 │   │   ├── rbac.yaml                    # ClusterRole & bindings for automated SandboxClaim lifecycle testing
-│   │   ├── test-workflow.yaml           # Git-sourced 60 QPS Ingress benchmark & warm-pool latency workflow
-│   │   ├── test-workflow-security.yaml  # Continuous red-team security audit & k6 broker fuzzing workflow
-│   │   ├── test-workflow-sustained-load.yaml # 70 RPS / 10K requests sustained load workflow (no pod restarts)
+│   │   ├── templates/                   # Jinja2 TestWorkflow templates rendered by Ansible with dynamic {{ minikube_ip }}
+│   │   │   ├── test-workflow.yaml.j2            # Self-contained 60 QPS Ingress benchmark & warm-pool latency workflow template
+│   │   │   ├── test-workflow-security.yaml.j2   # Self-contained red-team security audit & k6 broker fuzzing workflow template
+│   │   │   └── test-workflow-sustained-load.yaml.j2 # 70 RPS / 10K requests sustained load workflow template (no pod restarts)
 │   │   └── tests/
-│   │       ├── k6-sandbox-benchmark.js  # 60 QPS rate-limited Ingress benchmark script
+│   │       ├── k6-sandbox-benchmark.js  # 60 QPS rate-limited Ingress benchmark script (fail-fast TARGET_URL validation)
 │   │       ├── k6-security-audit.js     # k6 SSRF, C2 egress, credential leak & tenant isolation fuzzer
 │   │       ├── k6-sustained-load.js     # 70 RPS / 10K+ sustained traffic generator script
 │   │       └── claim_and_measure.py     # Warm pool claim-to-ready latency measurement hook
@@ -107,7 +114,7 @@ Running a production-grade 2-node Kubernetes cluster locally (`minikube` control
 * **CPU Architectures:** Both **`aarch64` (ARM64)** and **`x86_64` (AMD64)** are fully supported with multi-architecture OCI manifests and dynamic gVisor (`runsc`) package resolution.
 * **Detailed Setup:** For operating system and architecture-specific installation instructions, see the **[Multi-OS & Multi-Architecture Setup Guide](docs/MULTI_OS_SETUP_GUIDE.md)**.
 
-**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, and `helm`. The `testkube` CLI is automatically installed by `bootstrap_cluster.sh` (via Homebrew on macOS, or the official Linux installer on Linux/WSL2) if missing.
+**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, `helm`, and `ansible-core` (built-in system Python 3, zero external `pip` packages or Galaxy collections required). The `ansible-core` and `testkube` CLIs are automatically verified and installed by `bootstrap_cluster.sh` via native package managers (`brew`, `apt`, `dnf`) if missing.
 
 > [!IMPORTANT]
 > **Resource Sizing (macOS Docker Desktop / Linux / Windows WSL 2):**
@@ -144,6 +151,28 @@ The distinct images add up to only ~2.8 GB as reported by `crictl`; the rest is 
 
 > [!TIP]
 > **Cold Boot Patience:** On a fresh cluster (`minikube delete`), the image pulls dominate; the 723 MB sandbox image alone can occupy containerd for over a minute, which is why the bootstrap rollout timeouts are 180 s. Once the images are cached on the nodes, re-running `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` on a converged cluster took ~20 seconds in my run.
+
+---
+
+### 🚀 Developer Cheatsheet: Makefile & Execution Modes
+
+To eliminate typing long nested script paths or memorizing CLI flags, the root [`Makefile`](Makefile) provides unified shortcuts for every stage of development, testing, and cluster lifecycle management:
+
+| Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile |
+| :--- | :--- | :--- | :--- |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, platform & arch matrix |
+| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit |
+| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) |
+| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) |
+| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods |
+| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) |
+
+> [!NOTE]
+> **Privilege Escalation & Sudo Model:**
+> Standard cluster reconciliation runs **100% in user space** with zero root requirements and zero password prompts. Host `/etc/sysctl.d` and PAM file limit modifications are strictly opt-in (`--configure-host-sysctl`). For the complete architectural breakdown of the sudo keepalive loop, privilege boundaries, and CLI options, see the **[Privilege Escalation & Sudo Lifecycle Guide](docs/MULTI_OS_SETUP_GUIDE.md#privilege-escalation-sudo-lifecycle--security-model)** in the Multi-OS Setup Guide.
 
 ---
 
@@ -217,10 +246,11 @@ helm upgrade --install testkube kubeshop/testkube \
   --version 2.14.2 -n testkube --create-namespace \
   -f k8s-agent-sandbox/testkube/values-testkube.yaml
 
-kubectl apply -f k8s-agent-sandbox/testkube/rbac.yaml \
-              -f k8s-agent-sandbox/testkube/test-workflow.yaml \
-              -f k8s-agent-sandbox/testkube/test-workflow-security.yaml \
-              -f k8s-agent-sandbox/testkube/test-workflow-sustained-load.yaml
+kubectl apply -f k8s-agent-sandbox/testkube/rbac.yaml
+INGRESS_IP="<YOUR_INGRESS_OR_NODE_IP>"
+for tmpl in k8s-agent-sandbox/testkube/templates/test-workflow*.yaml.j2; do
+  sed "s/{{ minikube_ip }}/${INGRESS_IP}/g; s/{% raw %}//g; s/{% endraw %}//g" "$tmpl" | kubectl apply -f -
+done
 ```
 
 ---
@@ -229,11 +259,15 @@ kubectl apply -f k8s-agent-sandbox/testkube/rbac.yaml \
 
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
-1. **Provision or Self-Heal the Full 2-Node Cluster:** Run `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` (works from a fresh `minikube delete` or after a laptop sleep/reboot, reconciling all 8 layers including `minikube-m02`, `gVisor`, Prometheus/Grafana, `egress-broker`, and Testkube OSS).
-2. **Run Continuous Red-Team Security & Benchmark Workflows via Testkube:**
-   - `testkube run tw agent-sandbox-security-audit -f` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing)*
-   - `testkube run tw agent-sandbox-benchmark -f` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark with scale-to-zero)*
-   - `testkube run tw agent-sandbox-sustained-load -f` *(70 RPS sustained load for 10K+ requests targeting active sandbox without pod restarts)*
+1. **Audit or Provision the Full 2-Node Cluster via `make` (Ansible Reconciler):**
+   - **Fast Verification Suite:** Run `make check` to execute all 134 unit, syntax, and Jinja2 template rendering tests (~15s, zero VM spin-up).
+   - **Read-Only Dry Run (Zero Changes):** Run `make dry-run` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run`) to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
+   - **Host Toolchain Discovery:** Run `make preflight` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only`) to ensure required host binaries are present and exit before cluster changes.
+   - **Full Cluster Reconciliation:** Run `make cluster` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`), which delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml`, dynamically captures `minikube ip`, renders the Testkube workflow templates, and verifies all 11 service endpoints.
+2. **Run Continuous Red-Team Security & Benchmark Workflows via `make`:**
+   - `make test-security` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing)*
+   - `make test-benchmark` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark with scale-to-zero)*
+   - `make test-load` *(or `make test-load DURATION=2m QPS=70` — sustained load targeting active sandbox without pod restarts)*
 3. **Execute Interactive Demo Modules 1–4:** (`SandboxWarmPool`, Ephemeral CI/CD, Multi-Tenant PVC Isolation, `operatingMode: Suspended`, and `kubectl debug`).
 4. **Inspect Live Telemetry & Security Posture in Grafana:** (`http://grafana.127.0.0.1.nip.io`, login `admin` / `admin`).
 

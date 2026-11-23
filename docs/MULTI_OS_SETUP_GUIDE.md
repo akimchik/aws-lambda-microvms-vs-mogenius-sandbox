@@ -20,6 +20,105 @@ This guide provides end-to-end instructions for provisioning and running the **2
 
 ---
 
+## 🔐 Privilege Escalation, Sudo Lifecycle & Security Model
+
+To ensure secure, non-destructive execution across local developer workstations and shared CI/CD runners, the bootstrapper ([`k8s-agent-sandbox/scripts/bootstrap_cluster.sh`](../k8s-agent-sandbox/scripts/bootstrap_cluster.sh)) and Ansible reconciler ([`k8s-agent-sandbox/ansible/playbooks/site.yml`](../k8s-agent-sandbox/ansible/playbooks/site.yml)) operate under a strict **least-privilege boundary**:
+
+### 1. The Zero-Root Default Boundary
+* **No Sudo for Kubernetes:** Minikube (Docker driver), Helm charts, mogenius controller, gVisor sandboxes, and Testkube all execute entirely within unprivileged user space. They **never** require root privileges or Ansible `become: true`.
+* **Standard Bootstrap Runs:** When all required CLI tools are present, the bootstrapper runs **100% as the unprivileged user** with zero sudo calls and zero password prompts.
+
+### 2. Privilege Need Detection (`host_needs_privilege`)
+Root privileges are strictly confined to machine-level prerequisites:
+* **Toolchain bootstrap:** Installing `ansible-core` or missing CLI binaries (`kubectl`, `minikube`, `helm`, `testkube`) into `/usr/local/bin` when not writable.
+* **Kernel sysctl:** Applying high-concurrency open file descriptor and inotify limits (`/etc/sysctl.d`, `/etc/security/limits.d`).
+
+If all CLI tools are detected in `$PATH` and `--configure-host-sysctl` is not passed, `host_needs_privilege` evaluates to `false` and privilege escalation is completely bypassed.
+
+### 3. Sudo Lifecycle Flowchart
+```
+                [ ./bootstrap_cluster.sh ]
+                            │
+                            ▼
+                  host_needs_privilege()?
+                    ├── Base tools missing? (curl, jq, tar)
+                    ├── CLIs missing & /usr/local/bin read-only?
+                    └── --configure-host-sysctl passed?
+                            │
+               ┌────────────┴────────────┐
+               ▼                         ▼
+         [ FALSE ]                   [ TRUE ]
+       (Tools present)           (Tools missing)
+               │                         │
+               ▼                         ├── sudo -n true? (Active session in cache)
+       Zero Sudo Invocations             │    ├── YES ──► Continue without prompting
+       Zero BECOME Prompts               │    └── NO  ──► Prompt sudo -v ONCE in bash
+       Ansible runs as USER              │                 Start 50s keepalive loop
+                                         ▼
+                               Ansible runs as USER
+                               Installs binaries to /usr/local/bin
+```
+
+### 4. Background Sudo Session Keepalive
+When host tool installation requires elevated privileges, the bootstrapper authenticates once in bash via `sudo -v` and launches a lightweight background keepalive loop:
+```bash
+( while sudo -n true 2>/dev/null; do sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
+```
+This pings `sudo -n true` every 50 seconds to keep the kernel credential timestamp valid for the duration of the reconciliation, preventing mid-run credential timeouts or broken non-interactive executions without ever passing credentials over insecure channels.
+
+### 5. Host Kernel Tweaks (`--configure-host-sysctl`) are Strictly Opt-In
+Host kernel parameter changes (`/etc/sysctl.d/99-kubernetes-sandbox.conf`, PAM limits, systemd `DefaultLimitNOFILE`) modify host system state. To avoid unwanted host mutations on developer workstations:
+* Ansible defaults `configure_linux_sysctl` to `false` (`-e configure_linux_sysctl=false`).
+* Tasks affecting `/etc/sysctl.d` are skipped on standard runs.
+* To explicitly apply host-level kernel limits, pass the flag:
+  ```bash
+  ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --configure-host-sysctl
+  ```
+
+### 6. Explicit Ansible Privilege Escalation (`-K` / `--ask-become-pass`)
+Ansible will **never** prompt for `BECOME password:` by default. Only pass `-K` if you are executing custom playbooks or running in restricted root-only environments:
+```bash
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh -K
+```
+
+---
+
+## 🛠️ Reconciler CLI Reference & Execution Modes
+
+To avoid having to type long nested script paths or memorize CLI flags, the root [`Makefile`](../Makefile) provides standardized shortcuts across all developer workflows:
+
+### ⚡ Developer Makefile Cheatsheet vs. Direct Scripts
+
+| Goal / Stage | Make Target (Recommended) | Direct Script Command | Profile / Sizing | Privilege Required |
+| :--- | :--- | :--- | :--- | :--- |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, arch matrix | ❌ No |
+| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, sizing audit | ❌ No |
+| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) | ⚠️ Only if missing |
+| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) | ❌ No (User space) |
+| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods | ❌ No |
+| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows | ❌ No |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) | ❌ No |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) | ❌ No |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) | ❌ No |
+
+### 🔧 CLI Flag Reference (`bootstrap_cluster.sh`)
+
+The CLI wrapper `bootstrap_cluster.sh` delegates all 8 reconciliation layers to `ansible-playbook`. It supports several operational modes:
+
+| Flag | Mode | Description | Privilege Required |
+| :--- | :--- | :--- | :--- |
+| *(default)* | Full Reconcile | Converges all 8 layers: host prep, 2-node cluster, gVisor, Ingress, monitoring, mogenius, Testkube, and verification. | ❌ No (User space) |
+| `--dry-run` | Read-Only Audit | Runs `ansible-playbook --check --diff --tags preflight`. Evaluates host tools and sizing with **0 mutations**. | ❌ No (Read-only) |
+| `--preflight-only` | Preflight Discovery | Audits and installs missing host OS toolchains (`[0/8]`), then exits before creating or modifying Minikube. | ⚠️ Only if tools missing |
+| `--upgrade-helm` | Force Helm Upgrade | Upgrades existing Helm releases (`monitoring`, `mogenius`, `testkube`) even if versions match. | ❌ No (User space) |
+| `--configure-host-sysctl` | Host Kernel Tuning | Applies kernel inotify and open file descriptor limits to `/etc/sysctl.d` and PAM. | 🔑 Yes (sudo) |
+| `--ci` | Low-Resource CI Mode | Sizes Minikube cluster for 2 vCPUs and 4,096 MB RAM (for GitHub Actions runners). | ❌ No (User space) |
+| `--memory <MB>` | Custom Sizing | Sets custom primary node memory ceiling in MB (e.g. `--memory 6144`, min: 2048). | ❌ No (User space) |
+| `-K`, `--ask-become-pass` | Ansible Become Pass | Prompts for privilege escalation password at Ansible launch. | 🔑 Yes |
+| `-h`, `--help` | Help Menu | Displays CLI options and usage examples. | ❌ No |
+
+---
+
 ## 💻 Hardware & Sizing Requirements (All Systems)
 
 The cluster topology deploys a 2-node cluster (`minikube` + `minikube-m02`):
@@ -46,12 +145,19 @@ Do **NOT** use default Docker Desktop settings (4 GB RAM / 2 CPUs), or Grafana a
 
 ### B. Tooling Installation via Homebrew
 ```bash
-# Install Minikube, Kubectl, Helm, and Testkube CLI
-brew install minikube kubectl helm kubeshop/testkube/testkube
+# Install Minikube, Kubectl, Helm, Ansible, and Testkube CLI
+brew install minikube kubectl helm ansible kubeshop/testkube/testkube
 ```
 
-### C. Launch Cluster
+### C. Launch Cluster or Run Read-Only Dry-Run Audit
 ```bash
+# 1. Non-mutating read-only audit (ansible-playbook --check --diff, 0 changes)
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+
+# 2. Host toolchain discovery & preflight check only
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+
+# 3. Full declarative cluster reconciliation via Ansible
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 ```
 
@@ -70,27 +176,48 @@ Because Docker Desktop on macOS runs inside a lightweight virtual machine, the D
 
 Running natively on Linux provides the best performance because Docker interacts directly with the Linux kernel without virtualization overhead.
 
-### A. Host Kernel Tweaks (`sysctl`)
-Kubernetes multi-node clusters and Prometheus file monitors quickly exhaust default Linux inotify limits. Apply these settings before starting:
+### A. Host Kernel Tweaks (`sysctl`) & Inotify Limits
+Kubernetes multi-node clusters, containerd, Prometheus TSDB, and Testkube workflows (specifically `testkube-tw-toolkit` and k6 concurrency fuzzing) quickly exhaust default Linux inotify limits. On stock Linux installations, `fs.inotify.max_user_instances` defaults to only `128`, which causes Go's `fsnotify` file/log watchers to fail with `failed to create fsnotify watcher: too many open files`.
+
+> [!NOTE]
+> **Automatic In-Node Tuning (Zero Host Root Required):**
+> You do **not** need root privileges on your host machine to run this platform. During cluster reconciliation (`make cluster`), Ansible automatically tunes `fs.inotify.max_user_instances=8192` and `fs.inotify.max_user_watches=1048576` directly inside the `minikube` and `minikube-m02` node containers.
+>
+> If you also want to permanently elevate your host system's kernel ceilings, apply:
 
 ```bash
 # 1. Apply kernel parameters immediately
-sudo sysctl -w fs.inotify.max_user_watches=524288
-sudo sysctl -w fs.inotify.max_user_instances=512
+sudo sysctl -w fs.inotify.max_user_watches=1048576
+sudo sysctl -w fs.inotify.max_user_instances=8192
 sudo sysctl -w vm.max_map_count=262144
 sudo sysctl -w net.ipv4.ip_forward=1
 
 # 2. Persist across reboots
 sudo tee /etc/sysctl.d/99-kubernetes-sandbox.conf <<EOF
-fs.inotify.max_user_watches=524288
-fs.inotify.max_user_instances=512
+fs.inotify.max_user_watches=1048576
+fs.inotify.max_user_instances=8192
 vm.max_map_count=262144
 net.ipv4.ip_forward=1
 EOF
 sudo sysctl --system
 ```
 
-### B. Install Docker Engine (Community Edition)
+### B. Base Prerequisites & Toolchains
+To eliminate component installation toil on minimal or clean Linux distributions, ensure standard utilities (specifically `openssl` for Helm checksum validation, `jq`, `bzip2`, and `tar`) are installed. The bootstrapper (`make preflight`) checks and installs these automatically, but for manual preparation:
+
+#### On Debian / Ubuntu:
+```bash
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates tar jq bzip2 openssl procps
+```
+
+#### On RHEL / Rocky Linux 9 & 10 / AlmaLinux / Fedora:
+```bash
+sudo dnf install -y epel-release 2>/dev/null || true
+sudo dnf install -y --allowerasing curl ca-certificates tar jq bzip2 openssl procps-ng
+```
+
+### C. Install Docker Engine (Community Edition)
 
 #### On Debian / Ubuntu (`apt` - `x86_64` & `aarch64`):
 ```bash
@@ -146,10 +273,21 @@ curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 |
 
 # 4. Testkube CLI (Official Linux installer)
 curl -sSLf https://get.testkube.io | bash
+
+# 5. Ansible Core (auto-installed by bootstrap script if missing)
+# Ubuntu/Debian: sudo apt-get install -y ansible-core
+# RHEL/Rocky/Fedora: sudo dnf install -y ansible-core
 ```
 
-### D. Launch Cluster
+### D. Launch Cluster or Run Read-Only Dry-Run Audit
 ```bash
+# Non-mutating read-only audit (0 changes made)
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
+
+# Host toolchain discovery & preflight check only
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+
+# Full declarative cluster reconciliation
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 ```
 
@@ -322,8 +460,8 @@ Reopen Ubuntu.
 Inside the Ubuntu WSL 2 shell:
 ```bash
 # 1. Apply kernel sysctl tweaks
-sudo sysctl -w fs.inotify.max_user_watches=524288
-sudo sysctl -w fs.inotify.max_user_instances=512
+sudo sysctl -w fs.inotify.max_user_watches=1048576
+sudo sysctl -w fs.inotify.max_user_instances=8192
 sudo sysctl -w vm.max_map_count=262144
 sudo sysctl -w net.ipv4.ip_forward=1
 
@@ -360,6 +498,9 @@ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
 # Testkube CLI
 curl -sSLf https://get.testkube.io | bash
+
+# Ansible Core (or auto-installed by bootstrap script)
+sudo apt-get install -y ansible-core
 ```
 
 ### Step 6: Clone and Bootstrap
@@ -380,17 +521,19 @@ WSL 2 automatically forwards networking to Windows:
 
 ## 🧪 Validating the Platform (All Operating Systems)
 
-Once `bootstrap_cluster.sh` finishes with `Cluster is 100% CONVERGED, HEALTHY & READY!`, trigger the automated benchmarks and security probes on worker node `minikube-m02`:
+Once `make cluster` (`bootstrap_cluster.sh`) finishes with `Cluster is 100% CONVERGED, HEALTHY & READY!` (having dynamically captured `minikube ip` and rendered the Testkube workflow templates in `k8s-agent-sandbox/testkube/templates/*.yaml.j2`), trigger the automated benchmarks and security probes on worker node `minikube-m02` via `make`:
 
 ```bash
 # 1. Run the 60 QPS Ingress & Warm-Pool Latency Benchmark
-testkube run tw agent-sandbox-benchmark -f
+make test-benchmark
+# (Or override duration & QPS: make test-benchmark DURATION=30s QPS=80)
 
 # 2. Run the Continuous Red-Team Security Audit (gVisor T1-T6 Probe + k6 SSRF Fuzzer)
-testkube run tw agent-sandbox-security-audit -f
+make test-security
+# (Or override duration: make test-security DURATION=1m)
 
-# 3. Run the High-Throughput Sustained Load Benchmark (70 RPS / 10,500 requests)
-testkube run tw agent-sandbox-sustained-load -f
+# 3. Run the High-Throughput Sustained Load Benchmark (default 70 RPS / 150s, or custom 2-minute run)
+make test-load DURATION=2m QPS=100
 
 # 4. View execution history
 testkube get twe

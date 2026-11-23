@@ -1,0 +1,160 @@
+---
+- name: "[1/8] Query Docker daemon memory ceiling (MemTotal)"
+  ansible.builtin.command: docker info --format '{{ "{{" }}.MemTotal{{ "}}" }}'
+  register: docker_mem_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always, minikube, sizing]
+
+- name: "[1/8] Compute effective memory ceiling and auto-clamp if < 8192 MB"
+  ansible.builtin.set_fact:
+    detected_mem_mb: >-
+      {{
+        ((docker_mem_raw.stdout | trim | int) // 1048576)
+        if (docker_mem_raw.rc == 0 and (docker_mem_raw.stdout | trim | int) > 0)
+        else (ansible_facts['memtotal_mb'] | default(8192) | int)
+      }}
+  tags: [always, minikube, sizing]
+
+- name: "[1/8] Determine final Minikube primary node CPUs and Memory (MB)"
+  ansible.builtin.set_fact:
+    effective_cpus: "{{ 2 if (minikube_ci_mode | default(false) | bool) else (minikube_cpus | default(4) | int) }}"
+    effective_memory_mb: >-
+      {{
+        (minikube_custom_memory_mb | int) if ((minikube_custom_memory_mb | default('') | string | length) > 0)
+        else (
+          4096 if (minikube_ci_mode | default(false) | bool)
+          else (
+            ([3072, [(detected_mem_mb | default(8192) | int) - 1200, 6144] | min] | max)
+            if ((detected_mem_mb | default(8192) | int) < 8192)
+            else (minikube_memory_mb | default(8192) | int)
+          )
+        )
+      }}
+  tags: [always, minikube, sizing]
+
+- name: "[1/8] Report computed Minikube sizing"
+  ansible.builtin.debug:
+    msg: "Docker/Host Memory Ceiling={{ detected_mem_mb }} MB -> Target Minikube Sizing: {{ effective_cpus }} vCPUs, {{ effective_memory_mb }} MB RAM"
+  tags: [always, minikube, sizing]
+
+- name: "[1/8] Ensure Minikube primary node and dedicated worker '{{ minikube_worker_node }}' are running and tainted"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! minikube status >/dev/null 2>&1; then
+      minikube start --driver={{ minikube_driver }} --container-runtime={{ minikube_container_runtime }} --cpus={{ effective_cpus | default(minikube_cpus | default(4)) }} --memory={{ effective_memory_mb | default(minikube_memory_mb | default(8192)) }}
+    fi
+    if ! kubectl get node {{ minikube_worker_node }} >/dev/null 2>&1; then
+      minikube node add --worker=true
+    fi
+    kubectl label node {{ minikube_worker_node }} dedicated=testkube node-role.kubernetes.io/worker=testkube --overwrite >/dev/null
+    kubectl taint node {{ minikube_worker_node }} dedicated=testkube:NoSchedule --overwrite >/dev/null 2>&1 || true
+
+    # Configure high-concurrency inotify and open file limits inside Minikube nodes to prevent 'failed to create fsnotify watcher: too many open files'
+    for node in minikube {{ minikube_worker_node }}; do
+      minikube ssh -n "$node" "sudo sysctl -w fs.inotify.max_user_watches={{ k8s_sysctl_params['fs.inotify.max_user_watches'] }} fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }} fs.file-max={{ nofile_controls.linux.fs_file_max }} vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }} 2>/dev/null || true" >/dev/null 2>&1 || true
+    done
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [minikube]
+
+- name: "[1/8] Capture dynamic Minikube node IP"
+  ansible.builtin.command: minikube ip
+  register: minikube_ip_cmd
+  changed_when: false
+  check_mode: false
+  when: not (dry_run_mode | bool)
+  tags: [minikube]
+
+- name: "[1/8] Set dynamic minikube_ip fact"
+  ansible.builtin.set_fact:
+    minikube_ip: "{{ minikube_ip_cmd.stdout | trim }}"
+  when: not (dry_run_mode | bool) and minikube_ip_cmd.rc is defined and minikube_ip_cmd.rc == 0
+  tags: [minikube]
+
+- name: "[2/8] Verify CoreDNS health, disable legacy gVisor addon, and map control-plane.minikube.internal"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl -n kube-system get deployment coredns >/dev/null
+    minikube addons disable gvisor 2>/dev/null || true
+    CP_IP=$(minikube ip)
+    minikube ssh "grep -qx '${CP_IP} control-plane.minikube.internal' /etc/hosts || { { grep -v 'control-plane\.minikube\.internal' /etc/hosts || true; echo '${CP_IP} control-plane.minikube.internal'; } > /tmp/hosts.clean && sudo tee /etc/hosts < /tmp/hosts.clean >/dev/null && rm -f /tmp/hosts.clean; }"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not (dry_run_mode | bool)
+  tags: [minikube, gvisor]
+
+- name: "[3/8] Reconcile native Google gVisor (runsc), deduplicate containerd config.toml, and register RuntimeClass"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    minikube ssh "sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true"
+
+    if ! minikube ssh "/usr/bin/runsc --version >/dev/null 2>&1 && head -c 4 /usr/bin/containerd-shim-runsc-v1 2>/dev/null | grep -q ELF && [ -x /usr/bin/gvisor-bin/gvisor_sentry ]"; then
+      NODE_ARCH=$(minikube ssh "uname -m" 2>/dev/null | tr -d '\r\n')
+      case "$NODE_ARCH" in
+        x86_64|amd64) GVISOR_ARCH="x86_64" ;;
+        aarch64|arm64) GVISOR_ARCH="aarch64" ;;
+        *) GVISOR_ARCH="${NODE_ARCH:-x86_64}" ;;
+      esac
+      URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
+
+      rm -rf /tmp/gvisor_unpack
+      mkdir -p /tmp/gvisor_unpack
+      curl -fsSL --retry 3 "${URL}/gvisor.tar.bz2" -o /tmp/gvisor_unpack/gvisor.tar.bz2
+      if command -v bzip2 >/dev/null 2>&1 || tar -tf /tmp/gvisor_unpack/gvisor.tar.bz2 >/dev/null 2>&1; then
+        tar -xjf /tmp/gvisor_unpack/gvisor.tar.bz2 -C /tmp/gvisor_unpack/
+      else
+        python3 -c "import tarfile; tarfile.open('/tmp/gvisor_unpack/gvisor.tar.bz2').extractall('/tmp/gvisor_unpack/')"
+      fi
+      chmod -R a+rx /tmp/gvisor_unpack/
+
+      # Repack as a single uncompressed .tar so minikube cp transfers a regular file and guest tar needs no decompressor
+      tar -cf /tmp/gvisor_raw.tar -C /tmp/gvisor_unpack runsc containerd-shim-runsc-v1 gvisor-bin
+      minikube cp /tmp/gvisor_raw.tar minikube:/tmp/gvisor_raw.tar
+      minikube ssh "sudo rm -rf /usr/bin/gvisor-bin && sudo tar -xf /tmp/gvisor_raw.tar -C /usr/bin/ && sudo chmod -R a+rx /usr/bin/runsc /usr/bin/containerd-shim-runsc-v1 /usr/bin/gvisor-bin && sudo rm -f /tmp/gvisor_raw.tar"
+      rm -rf /tmp/gvisor_unpack /tmp/gvisor_raw.tar
+    fi
+
+    minikube ssh '
+    set -euo pipefail
+    CONFIG_PATH="/etc/containerd/config.toml"
+    if [ ! -f "$CONFIG_PATH" ]; then
+      sudo mkdir -p /etc/containerd
+      containerd config default | sudo tee "$CONFIG_PATH" >/dev/null
+    fi
+    awk '\''
+    BEGIN { in_dup = 0; seen = 0; }
+    index($0, "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]") == 1 {
+      seen = seen + 1;
+      if (seen > 1) { in_dup = 1; next; }
+      print; next;
+    }
+    index($0, "[") == 1 { in_dup = 0; }
+    { if (in_dup) { next; } print; }
+    END {
+      if (seen == 0) {
+        printf "\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]\n  runtime_type = \"io.containerd.runsc.v1\"\n";
+      }
+    }
+    '\'' "$CONFIG_PATH" > /tmp/config.toml.clean
+    if ! cmp -s "$CONFIG_PATH" /tmp/config.toml.clean; then
+      sudo mv /tmp/config.toml.clean "$CONFIG_PATH"
+      sudo systemctl restart containerd
+    else
+      rm -f /tmp/config.toml.clean
+    fi
+    '
+    cat <<EOF | kubectl apply -f - >/dev/null
+    apiVersion: node.k8s.io/v1
+    kind: RuntimeClass
+    metadata:
+      name: gvisor
+    handler: runsc
+    EOF
+  args:
+    executable: /bin/bash
+  when: not (dry_run_mode | bool)
+  tags: [gvisor]

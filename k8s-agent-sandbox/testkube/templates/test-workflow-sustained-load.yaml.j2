@@ -21,7 +21,7 @@ spec:
     targetUrl:
       description: Target Ingress URL
       type: string
-      default: "http://192.168.49.2:80"
+      default: "http://{{ minikube_ip }}:80"
     qps:
       description: Ingress Request Rate (QPS / RPS)
       type: integer
@@ -58,7 +58,10 @@ spec:
           },
         };
 
-        const BASE_URL = __ENV.TARGET_URL || 'http://192.168.49.2:80';
+        const BASE_URL = __ENV.TARGET_URL;
+        if (!BASE_URL) {
+          throw new Error('FATAL: TARGET_URL environment variable is required.');
+        }
         const SANDBOX_ID = __ENV.SANDBOX_ID;
         const SANDBOX_NAMESPACE = 'agent-sandbox';
         const SANDBOX_PORT = '8080';
@@ -103,11 +106,11 @@ spec:
       image: grafana/k6:latest
       env:
       - name: TARGET_URL
-        value: "{{ config.targetUrl }}"
+        value: "{% raw %}{{ config.targetUrl }}{% endraw %}"
       - name: QPS
-        value: "{{ config.qps }}"
+        value: "{% raw %}{{ config.qps }}{% endraw %}"
       - name: BENCH_DURATION
-        value: "{{ config.duration }}"
+        value: "{% raw %}{{ config.duration }}{% endraw %}"
       shell: |
         if [ -f /data/sandbox_id.txt ]; then
           export SANDBOX_ID=$(cat /data/sandbox_id.txt)

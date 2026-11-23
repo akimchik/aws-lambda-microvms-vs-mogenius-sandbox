@@ -1,0 +1,37 @@
+---
+# ==============================================================================
+# Stage 0: Host OS, Kernel Sysctl & Toolchain Preparation Orchestrator
+# Dispatches to modular OS-specific task files across 5 matrix flows:
+# Flow 1: macOS Apple Silicon (Darwin arm64)
+# Flow 2: Linux Ubuntu (Debian x86_64)
+# Flow 3: Linux Ubuntu (Debian aarch64)
+# Flow 4: Linux Rocky Linux 9 & 10 (RedHat x86_64)
+# Flow 5: Linux Rocky Linux 9 & 10 (RedHat aarch64)
+# ==============================================================================
+
+- name: "[0/8] Map normalized CPU architecture facts (cli_arch and runsc_arch)"
+  ansible.builtin.set_fact:
+    cli_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['arm64', 'aarch64'] else 'amd64' }}"
+    runsc_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['arm64', 'aarch64'] else 'x86_64' }}"
+    host_pkg_mgr: "{{ 'brew' if ansible_facts['system'] == 'Darwin' else ('apt' if ansible_facts['os_family'] == 'Debian' else ('dnf' if ansible_facts['os_family'] == 'RedHat' else 'generic')) }}"
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8] Display detected host platform, architecture, and package manager"
+  ansible.builtin.debug:
+    msg: "Host={{ ansible_facts['system'] }} ({{ ansible_facts['os_family'] }}) | Arch={{ ansible_facts['architecture'] }} (CLI={{ cli_arch }}, gVisor={{ runsc_arch }}) | PkgMgr={{ host_pkg_mgr }}"
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8] Include macOS (Darwin) host preparation tasks (Flow 1)"
+  ansible.builtin.import_tasks: 00_host_prep_darwin.yml
+  when: ansible_facts['system'] == 'Darwin'
+  tags: [preflight, host-prep]
+
+- name: "[0/8] Include Ubuntu / Debian host preparation tasks (Flows 2 & 3)"
+  ansible.builtin.import_tasks: 00_host_prep_ubuntu.yml
+  when: ansible_facts['system'] == 'Linux' and ansible_facts['os_family'] == 'Debian'
+  tags: [preflight, host-prep, sysctl, nofile, vm-optimize]
+
+- name: "[0/8] Include Rocky Linux / RHEL host preparation tasks (Flows 4 & 5)"
+  ansible.builtin.import_tasks: 00_host_prep_rocky.yml
+  when: ansible_facts['system'] == 'Linux' and ansible_facts['os_family'] == 'RedHat'
+  tags: [preflight, host-prep, sysctl, nofile, vm-optimize]

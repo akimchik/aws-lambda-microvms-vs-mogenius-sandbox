@@ -1,0 +1,16 @@
+---
+- name: Provision & Reconcile Multi-OS 2-Node Kubernetes Agent Sandbox Platform (gVisor + mogenius + Testkube)
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: "[Stage 0] Host OS, Kernel Sysctl & Toolchain Preparation"
+      ansible.builtin.import_tasks: ../tasks/00_host_prep.yml
+      tags: [preflight, host-prep]
+
+    - name: "[Stages 1-3] Minikube Multi-Node Topology, Memory Clamping & gVisor Runtime"
+      ansible.builtin.import_tasks: ../tasks/01_minikube_gvisor.yml
+      tags: [minikube, gvisor]
+
+    - name: "[Stages 4-8] Ingress, Observability, mogenius Sandbox, Egress Broker, Testkube & Endpoint Verification"
+      ansible.builtin.import_tasks: ../tasks/02_k8s_stack.yml
+      tags: [k8s-stack, verify]

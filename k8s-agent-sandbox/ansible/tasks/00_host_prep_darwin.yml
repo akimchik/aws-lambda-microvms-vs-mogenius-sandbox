@@ -1,0 +1,67 @@
+---
+# ==============================================================================
+# FLOW 1: macOS Apple Silicon (arm64) Host Toolchain Preparation
+# Strictly unprivileged user space (zero become/sudo required)
+# ==============================================================================
+
+- name: "[0/8 macOS] Resolve Apple Silicon Homebrew prefix"
+  ansible.builtin.set_fact:
+    brew_prefix: "/opt/homebrew"
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 macOS] Audit host CLI tools (kubectl, minikube, helm, testkube, docker)"
+  ansible.builtin.shell: |
+    for tool in kubectl minikube helm testkube docker; do
+      if command -v "$tool" >/dev/null 2>&1; then
+        echo "PRESENT:$tool:$(command -v "$tool")"
+      else
+        echo "MISSING:$tool"
+      fi
+    done
+  environment:
+    PATH: "{{ brew_prefix }}/bin:{{ brew_prefix }}/sbin:{{ ansible_facts['env']['PATH'] }}"
+  args:
+    executable: /bin/bash
+  register: cli_audit_darwin
+  changed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 macOS] Install missing CLI tools via Homebrew"
+  ansible.builtin.shell: |
+    set -e
+    command -v kubectl >/dev/null 2>&1 || brew install kubectl
+    command -v minikube >/dev/null 2>&1 || brew install minikube
+    command -v helm >/dev/null 2>&1 || brew install helm
+    command -v testkube >/dev/null 2>&1 || brew install kubeshop/testkube/testkube || brew install testkube
+  environment:
+    PATH: "{{ brew_prefix }}/bin:{{ brew_prefix }}/sbin:{{ ansible_facts['env']['PATH'] }}"
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - "'MISSING:kubectl' in cli_audit_darwin.stdout or 'MISSING:minikube' in cli_audit_darwin.stdout or 'MISSING:helm' in cli_audit_darwin.stdout or 'MISSING:testkube' in cli_audit_darwin.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 macOS] Verify Docker container runtime is available on host"
+  ansible.builtin.shell: |
+    if ! command -v docker >/dev/null 2>&1; then
+      echo "ERROR: Docker is required for Minikube (--driver=docker) but was not found in PATH."
+      echo "Please install Docker Desktop (e.g. 'brew install --cask docker') or start your container engine."
+      exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+      echo "ERROR: Docker Desktop is installed but the daemon is not running."
+      echo "Please start Docker Desktop ('open -a Docker') before reconciling the cluster."
+      exit 1
+    fi
+  environment:
+    PATH: "{{ brew_prefix }}/bin:{{ brew_prefix }}/sbin:{{ ansible_facts['env']['PATH'] }}"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - not (dry_run_mode | bool)
+    - not (preflight_only_mode | default(false) | bool)
+  tags: [host-prep]
