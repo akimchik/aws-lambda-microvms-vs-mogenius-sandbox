@@ -31,11 +31,67 @@ spec:
       type: string
       default: "15s"
   content:
-    git:
-      uri: https://github.com/akimchik/aws-lambda-microvms-workshop.git
-      revision: main
-      paths:
-      - k8s-agent-sandbox/testkube/tests
+    files:
+    - path: k6-sandbox-benchmark.js
+      content: |
+        import http from 'k6/http';
+        import { check } from 'k6';
+        import { Rate, Trend } from 'k6/metrics';
+
+        export const successRate = new Rate('sandbox_success_rate');
+        export const manifestLatency = new Trend('sandbox_manifest_duration_ms');
+        export const healthLatency = new Trend('sandbox_health_duration_ms');
+
+        export const options = {
+          scenarios: {
+            sandbox_rate_limited: {
+              executor: 'constant-arrival-rate',
+              rate: Number(__ENV.QPS) || 60,
+              timeUnit: '1s',
+              duration: __ENV.BENCH_DURATION || '15s',
+              preAllocatedVUs: 20,
+              maxVUs: 60,
+            },
+          },
+          thresholds: {
+            http_req_failed: ['rate<0.25'],
+            http_req_duration: ['p(95)<150'],
+          },
+        };
+
+        const BASE_URL = __ENV.TARGET_URL;
+        if (!BASE_URL) {
+          throw new Error('FATAL: TARGET_URL environment variable is required.');
+        }
+        const SANDBOX_ID = __ENV.SANDBOX_ID;
+        const SANDBOX_NAMESPACE = 'agent-sandbox';
+        const SANDBOX_PORT = '8080';
+
+        const HEADERS = {
+          'Host': 'sandbox.127.0.0.1.nip.io',
+          'X-Sandbox-ID': SANDBOX_ID,
+          'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
+          'X-Sandbox-Port': SANDBOX_PORT,
+          'User-Agent': 'k6-testkube-benchmark',
+        };
+
+        export default function () {
+          const rand = Math.random();
+          if (rand < 0.55) {
+            const res = http.get(`${BASE_URL}/manifest.json`, { headers: HEADERS });
+            const ok = check(res, { 'manifest is 200': (r) => r.status === 200 });
+            successRate.add(ok);
+            manifestLatency.add(res.timings.duration);
+          } else if (rand < 0.85) {
+            const res = http.get(`${BASE_URL}/healthz`, { headers: HEADERS });
+            const ok = check(res, { 'health is 200': (r) => r.status === 200 });
+            successRate.add(ok);
+            healthLatency.add(res.timings.duration);
+          } else {
+            const res = http.get(`${BASE_URL}/nonexistent-probe`, { headers: HEADERS });
+            check(res, { 'nonexistent is 404': (r) => r.status === 404 });
+          }
+        }
   steps:
   - name: Trigger Warm Pool Claim & Dynamic Latency Metric
     run:

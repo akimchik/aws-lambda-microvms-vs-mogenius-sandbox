@@ -1284,6 +1284,28 @@ assert len(docs) > 0 and docs[0].get('kind') == 'TestWorkflow', 'Rendered manife
     done
 fi
 
+# Verify dynamic KUBERNETES_SERVICE_HOST resolution in threat_probe.py and k6-security-audit.js
+if grep -q "KUBERNETES_SERVICE_HOST" "${K8S_DIR}/threat-model/threat_probe.py" && \
+   grep -q "KUBERNETES_SERVICE_HOST" "${K8S_DIR}/testkube/tests/k6-security-audit.js"; then
+    assert_test "Security probes: Dynamic KUBERNETES_SERVICE_HOST resolution verified" 0
+else
+    assert_test "Security probes: Dynamic KUBERNETES_SERVICE_HOST resolution missing" 1
+fi
+
+# Verify idempotent /etc/hosts update for control-plane.minikube.internal when Minikube IP changes
+if grep -q "grep -qx.*\${CP_IP} control-plane.minikube.internal" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml"; then
+    assert_test "tasks/01_minikube_gvisor.yml: Idempotent /etc/hosts overwrite on Minikube IP change verified" 0
+else
+    assert_test "tasks/01_minikube_gvisor.yml: Idempotent /etc/hosts overwrite missing" 1
+fi
+
+# Verify TestWorkflow templates use self-contained content.files (no external GitHub revision: main pinning)
+if ! grep -q "revision: main" "${K8S_DIR}/testkube/templates/"*.j2; then
+    assert_test "Testkube templates: Hermetic self-contained content.files (no external GitHub main pinning)" 0
+else
+    assert_test "Testkube templates: External GitHub revision: main pinning still present" 1
+fi
+
 # ==============================================================================
 # Summary Report
 # ==============================================================================

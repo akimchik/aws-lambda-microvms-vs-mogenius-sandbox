@@ -80,7 +80,7 @@
     kubectl -n kube-system get deployment coredns >/dev/null
     minikube addons disable gvisor 2>/dev/null || true
     CP_IP=$(minikube ip)
-    minikube ssh "grep -q 'control-plane.minikube.internal' /etc/hosts || echo '${CP_IP} control-plane.minikube.internal' | sudo tee -a /etc/hosts >/dev/null"
+    minikube ssh "grep -qx '${CP_IP} control-plane.minikube.internal' /etc/hosts || { { grep -v 'control-plane\.minikube\.internal' /etc/hosts || true; echo '${CP_IP} control-plane.minikube.internal'; } > /tmp/hosts.clean && sudo tee /etc/hosts < /tmp/hosts.clean >/dev/null && rm -f /tmp/hosts.clean; }"
   args:
     executable: /bin/bash
   changed_when: false

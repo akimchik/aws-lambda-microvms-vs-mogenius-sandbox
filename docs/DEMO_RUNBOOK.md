@@ -16,7 +16,7 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run the Ansible bootstrapper:
 
 ```bash
-# 0. Fast verification suite (131 unit, YAML & Jinja2 template rendering tests, zero VM spin-up)
+# 0. Fast verification suite (134 unit, YAML & Jinja2 template rendering tests, zero VM spin-up)
 make check
 
 # 1. Non-mutating read-only audit (runs ansible-playbook --check --diff, 0 changes made)

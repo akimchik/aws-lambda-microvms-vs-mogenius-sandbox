@@ -35,12 +35,108 @@ spec:
       type: string
       default: "15s"
   content:
-    git:
-      uri: https://github.com/akimchik/aws-lambda-microvms-workshop.git
-      revision: main
-      paths:
-      - k8s-agent-sandbox/testkube/tests
-      - k8s-agent-sandbox/threat-model
+    files:
+    - path: threat_probe.py
+      content: |
+        #!/usr/bin/env python3
+        import os, sys, json, time, socket, ssl, urllib.request, urllib.error
+        from pathlib import Path
+        TIMEOUT = 2.5
+
+        def check_imds_ssrf():
+            url = "http://169.254.169.254/latest/meta-data/"
+            start = time.time()
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "threat-probe"})
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                    elapsed = (time.time() - start) * 1000
+                    content = resp.read(64).decode(errors="ignore")
+                    return {"id": "T1_IMDS_SSRF", "name": "Cloud IMDS & SSRF Probe", "target": url, "status": "FAIL (EXPOSED)", "latency_ms": round(elapsed, 2), "detail": f"VULNERABLE: IMDS returned HTTP {resp.status}: {content[:30]}..."}
+            except Exception as e:
+                return {"id": "T1_IMDS_SSRF", "name": "Cloud IMDS & SSRF Probe", "target": url, "status": "PASS (BLOCKED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Connection blocked / timed out: {type(e).__name__}"}
+
+        def check_k8s_api_lateral():
+            k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST") or "10.96.0.1"
+            k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT") or "443"
+            target = f"https://{k8s_host}:{k8s_port}/version"
+            start = time.time()
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            try:
+                req = urllib.request.Request(target, headers={"User-Agent": "threat-probe"})
+                with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
+                    elapsed = (time.time() - start) * 1000
+                    data = resp.read(64).decode(errors="ignore")
+                    return {"id": "T2_K8S_API_LATERAL", "name": "K8s API Lateral Movement", "target": target, "status": "FAIL (EXPOSED)", "latency_ms": round(elapsed, 2), "detail": f"VULNERABLE: Connected to Kubernetes API: {data[:30]}..."}
+            except Exception as e:
+                return {"id": "T2_K8S_API_LATERAL", "name": "K8s API Lateral Movement", "target": target, "status": "PASS (BLOCKED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Access blocked: {type(e).__name__}"}
+
+        def check_internal_service_lateral():
+            target = "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/-/healthy"
+            start = time.time()
+            try:
+                req = urllib.request.Request(target, headers={"User-Agent": "threat-probe"})
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                    return {"id": "T3_INTERNAL_SVC_LATERAL", "name": "Internal Service Discovery", "target": target, "status": "FAIL (EXPOSED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"VULNERABLE: Connected to internal Prometheus HTTP {resp.status}"}
+            except Exception as e:
+                return {"id": "T3_INTERNAL_SVC_LATERAL", "name": "Internal Service Discovery", "target": target, "status": "PASS (BLOCKED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Service blocked: {type(e).__name__}"}
+
+        def check_ambient_credentials():
+            start = time.time()
+            findings = []
+            if Path("/var/run/secrets/kubernetes.io/serviceaccount/token").exists():
+                findings.append("K8s ServiceAccount token mounted in /var/run/secrets")
+            home = Path.home()
+            if (home / ".ssh").exists() and any((home / ".ssh").iterdir()):
+                findings.append("~/.ssh directory contains keys")
+            if (home / ".aws").exists() and any((home / ".aws").iterdir()):
+                findings.append("~/.aws directory contains credentials")
+            sensitive_keys = [k for k in os.environ if any(term in k.upper() for term in ["AWS_SECRET", "AWS_ACCESS", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "SSH_KEY"])]
+            if sensitive_keys:
+                findings.append(f"Sensitive env vars present: {', '.join(sensitive_keys)}")
+            elapsed = round((time.time() - start) * 1000, 2)
+            if findings:
+                return {"id": "T4_AMBIENT_CREDENTIALS", "name": "Ambient Credential Harvesting", "target": "Filesystem & Environment", "status": "FAIL (EXPOSED)", "latency_ms": elapsed, "detail": " | ".join(findings)}
+            return {"id": "T4_AMBIENT_CREDENTIALS", "name": "Ambient Credential Harvesting", "target": "Filesystem & Environment", "status": "PASS (ZERO_IN_GUEST_CREDENTIALS)", "latency_ms": elapsed, "detail": "Zero service account tokens, zero cloud keys, zero ambient secrets found in container"}
+
+        def check_broker_egress(broker_url):
+            results = []
+            c2_url = f"{broker_url}/proxy?url=http://example.com"
+            start = time.time()
+            try:
+                req = urllib.request.Request(c2_url, headers={"User-Agent": "threat-probe"})
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                    results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "FAIL (EXPOSED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker allowed unauthorized domain: HTTP {resp.status}"})
+            except urllib.error.HTTPError as e:
+                results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "PASS (BLOCKED_BY_BROKER)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker rejected unwhitelisted FQDN with HTTP {e.code}"})
+            except Exception as e:
+                results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "FAIL (ERROR)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker unreachable: {type(e).__name__}"})
+
+            auth_url = f"{broker_url}/github-api/repo-metadata"
+            start = time.time()
+            try:
+                req = urllib.request.Request(auth_url, headers={"User-Agent": "threat-probe"})
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                    body = json.loads(resp.read().decode())
+                    if body.get("token_injected") and body.get("auth_header_present"):
+                        results.append({"id": "T6C_OUT_OF_SANDBOX_AUTH", "name": "Zero-In-Guest Credential Broker", "target": auth_url, "status": "PASS (BROKER_INJECTED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"SUCCESS: Short-lived token (TTL {body.get('token_ttl_seconds', 0)}s) injected on-the-wire outside guest."})
+                    else:
+                        results.append({"id": "T6C_OUT_OF_SANDBOX_AUTH", "name": "Zero-In-Guest Credential Broker", "target": auth_url, "status": "FAIL (TOKEN_MISSING)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker response missing auth verification: {body}"})
+            except Exception as e:
+                results.append({"id": "T6C_OUT_OF_SANDBOX_AUTH", "name": "Zero-In-Guest Credential Broker", "target": auth_url, "status": "FAIL (ERROR)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Credential broker call failed: {type(e).__name__}"})
+            return results
+
+        def main():
+            results = [check_imds_ssrf(), check_k8s_api_lateral(), check_internal_service_lateral(), check_ambient_credentials()]
+            broker_url = os.environ.get("EGRESS_BROKER_URL")
+            if broker_url:
+                results.extend(check_broker_egress(broker_url))
+            for r in results:
+                print(f"| `{r['id']}` | **{r['name']}** | `{r['target']}` | **{r['status']}** | {r['latency_ms']}ms | {r['detail']} |")
+
+        if __name__ == "__main__":
+            main()
   steps:
   - name: Claim Untrusted gVisor Sandbox for Red-Team Audit
     run:
@@ -152,6 +248,8 @@ spec:
         };
 
         const BROKER_URL = __ENV.EGRESS_BROKER_URL || 'http://egress-broker.sandbox-egress-system.svc.cluster.local:8080';
+        const K8S_API_HOST = __ENV.KUBERNETES_SERVICE_HOST || '10.96.0.1';
+        const K8S_API_PORT = __ENV.KUBERNETES_SERVICE_PORT || '443';
         const INGRESS_URL = __ENV.TARGET_URL;
         if (!INGRESS_URL) {
           throw new Error('FATAL: TARGET_URL environment variable is required.');
@@ -168,9 +266,9 @@ spec:
             securityPassRate.add(ok);
             brokerFilterLatency.add(res.timings.duration);
           } else if (rand < 0.50) {
-            const res = http.get(`${BROKER_URL}/proxy?url=https://10.96.0.1:443/api/v1/namespaces/kube-system/secrets`);
+            const res = http.get(`${BROKER_URL}/proxy?url=https://${K8S_API_HOST}:${K8S_API_PORT}/api/v1/namespaces/kube-system/secrets`);
             const ok = check(res, {
-              '[T2-K8S-API] Broker blocks K8s API 10.96.0.1 with HTTP 403': (r) => r.status === 403,
+              '[T2-K8S-API] Broker blocks K8s API internal service IP with HTTP 403': (r) => r.status === 403,
             });
             securityPassRate.add(ok);
             brokerFilterLatency.add(res.timings.duration);

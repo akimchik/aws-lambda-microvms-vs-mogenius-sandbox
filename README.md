@@ -61,8 +61,8 @@ This repository contains the end-to-end reference architectures, deployment mani
 │   │   ├── values-testkube.yaml         # Helm values pinning Testkube OSS strictly to worker node minikube-m02
 │   │   ├── rbac.yaml                    # ClusterRole & bindings for automated SandboxClaim lifecycle testing
 │   │   ├── templates/                   # Jinja2 TestWorkflow templates rendered by Ansible with dynamic {{ minikube_ip }}
-│   │   │   ├── test-workflow.yaml.j2            # Git-sourced 60 QPS Ingress benchmark & warm-pool latency workflow template
-│   │   │   ├── test-workflow-security.yaml.j2   # Continuous red-team security audit & k6 broker fuzzing workflow template
+│   │   │   ├── test-workflow.yaml.j2            # Self-contained 60 QPS Ingress benchmark & warm-pool latency workflow template
+│   │   │   ├── test-workflow-security.yaml.j2   # Self-contained red-team security audit & k6 broker fuzzing workflow template
 │   │   │   └── test-workflow-sustained-load.yaml.j2 # 70 RPS / 10K requests sustained load workflow template (no pod restarts)
 │   │   └── tests/
 │   │       ├── k6-sandbox-benchmark.js  # 60 QPS rate-limited Ingress benchmark script (fail-fast TARGET_URL validation)
@@ -260,7 +260,7 @@ done
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
 1. **Audit or Provision the Full 2-Node Cluster via `make` (Ansible Reconciler):**
-   - **Fast Verification Suite:** Run `make check` to execute all 131 unit, syntax, and Jinja2 template rendering tests (~15s, zero VM spin-up).
+   - **Fast Verification Suite:** Run `make check` to execute all 134 unit, syntax, and Jinja2 template rendering tests (~15s, zero VM spin-up).
    - **Read-Only Dry Run (Zero Changes):** Run `make dry-run` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run`) to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
    - **Host Toolchain Discovery:** Run `make preflight` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only`) to ensure required host binaries are present and exit before cluster changes.
    - **Full Cluster Reconciliation:** Run `make cluster` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`), which delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml`, dynamically captures `minikube ip`, renders the Testkube workflow templates, and verifies all 11 service endpoints.

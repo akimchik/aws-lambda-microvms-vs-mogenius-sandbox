@@ -50,7 +50,9 @@ def check_imds_ssrf():
         }
 
 def check_k8s_api_lateral():
-    target = "https://10.96.0.1:443/version"
+    k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST") or "10.96.0.1"
+    k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT") or "443"
+    target = f"https://{k8s_host}:{k8s_port}/version"
     start = time.time()
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
