@@ -27,7 +27,10 @@ export const options = {
 };
 
 const BROKER_URL = __ENV.EGRESS_BROKER_URL || 'http://egress-broker.sandbox-egress-system.svc.cluster.local:8080';
-const INGRESS_URL = __ENV.TARGET_URL || 'http://192.168.49.2:80';
+const INGRESS_URL = __ENV.TARGET_URL;
+if (!INGRESS_URL) {
+  throw new Error('FATAL: TARGET_URL environment variable is required. Example: TARGET_URL=http://$(minikube ip):80 k6 run ...');
+}
 
 export default function () {
   const rand = Math.random();

@@ -80,6 +80,18 @@
   when: not (dry_run_mode | bool)
   tags: [egress-broker, k8s-stack]
 
+- name: "[8/8] Render Testkube workflow templates with dynamic Minikube IP"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../../testkube/templates/{{ item }}.j2"
+    dest: "{{ playbook_dir }}/../../testkube/{{ item }}"
+    mode: "0644"
+  loop:
+    - test-workflow.yaml
+    - test-workflow-security.yaml
+    - test-workflow-sustained-load.yaml
+  when: not (dry_run_mode | bool)
+  tags: [testkube, k8s-stack]
+
 - name: "[8/8] Reconcile Testkube OSS on '{{ minikube_worker_node }}', RBAC & TestWorkflows"
   ansible.builtin.shell: |
     set -euo pipefail

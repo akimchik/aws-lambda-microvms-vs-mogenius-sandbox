@@ -1176,9 +1176,9 @@ REQUIRED_MANIFESTS=(
     "${K8S_DIR}/monitoring/grafana-dashboard-testkube.yaml"
     "${K8S_DIR}/threat-model/egress-broker.yaml"
     "${K8S_DIR}/testkube/rbac.yaml"
-    "${K8S_DIR}/testkube/test-workflow.yaml"
-    "${K8S_DIR}/testkube/test-workflow-security.yaml"
-    "${K8S_DIR}/testkube/test-workflow-sustained-load.yaml"
+    "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2"
+    "${K8S_DIR}/testkube/templates/test-workflow-security.yaml.j2"
+    "${K8S_DIR}/testkube/templates/test-workflow-sustained-load.yaml.j2"
     "${K8S_DIR}/ansible/group_vars/all.yml"
     "${K8S_DIR}/ansible/playbooks/site.yml"
     "${K8S_DIR}/ansible/tasks/00_host_prep.yml"
@@ -1251,6 +1251,37 @@ if grep -q "GLIBC_TUNABLES" "${K8S_DIR}/testkube/values-testkube.yaml"; then
     assert_test "Testkube values: GLIBC_TUNABLES rseq=1 present for kernel 6.19+" 0
 else
     assert_test "Testkube values: GLIBC_TUNABLES rseq=1 missing" 1
+fi
+
+# Verify Jinja2 template rendering for Testkube workflows
+JINJA_RENDER_PY=""
+for candidate_py in /opt/homebrew/Cellar/ansible/*/libexec/bin/python $(which python3 python 2>/dev/null); do
+    if [ -x "$candidate_py" ] && "$candidate_py" -c "import jinja2, yaml" >/dev/null 2>&1; then
+        JINJA_RENDER_PY="$candidate_py"
+        break
+    fi
+done
+
+if [ -n "$JINJA_RENDER_PY" ]; then
+    for tmpl in "test-workflow.yaml.j2" "test-workflow-security.yaml.j2" "test-workflow-sustained-load.yaml.j2"; do
+        if "$JINJA_RENDER_PY" -c "
+import jinja2, yaml, sys, random
+env = jinja2.Environment(loader=jinja2.FileSystemLoader('${K8S_DIR}/testkube/templates'))
+tmpl = env.get_template('$tmpl')
+dynamic_test_ip = f'{random.randint(10, 240)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}'
+out = tmpl.render(minikube_ip=dynamic_test_ip)
+assert f'http://{dynamic_test_ip}:80' in out, f'Template failed to inject dynamic IP {dynamic_test_ip}'
+assert '{{ config.targetUrl }}' in out, 'TestWorkflow config.targetUrl was corrupted by templating'
+assert '{% raw %}' not in out, 'Unescaped raw tag remains in output'
+assert '{{ minikube_ip }}' not in out, 'Unrendered minikube_ip variable remains in output'
+docs = list(yaml.safe_load_all(out))
+assert len(docs) > 0 and docs[0].get('kind') == 'TestWorkflow', 'Rendered manifest is not a valid TestWorkflow CRD'
+" >/dev/null 2>&1; then
+            assert_test "Testkube template render (Jinja2): ${tmpl} (injects minikube_ip, preserves TestWorkflow config)" 0
+        else
+            assert_test "Testkube template render (Jinja2): ${tmpl} (render or YAML validation failure)" 1
+        fi
+    done
 fi
 
 # ==============================================================================

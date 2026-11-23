@@ -9,6 +9,7 @@ minikube_ci_mode: false
 minikube_driver: docker
 minikube_container_runtime: containerd
 minikube_worker_node: minikube-m02
+minikube_ip: "127.0.0.1"
 
 # Execution Modes
 force_helm_upgrade: false

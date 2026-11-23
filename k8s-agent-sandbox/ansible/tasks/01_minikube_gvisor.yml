@@ -60,6 +60,20 @@
   when: not (dry_run_mode | bool)
   tags: [minikube]
 
+- name: "[1/8] Capture dynamic Minikube node IP"
+  ansible.builtin.command: minikube ip
+  register: minikube_ip_cmd
+  changed_when: false
+  check_mode: false
+  when: not (dry_run_mode | bool)
+  tags: [minikube]
+
+- name: "[1/8] Set dynamic minikube_ip fact"
+  ansible.builtin.set_fact:
+    minikube_ip: "{{ minikube_ip_cmd.stdout | trim }}"
+  when: not (dry_run_mode | bool) and minikube_ip_cmd.rc is defined and minikube_ip_cmd.rc == 0
+  tags: [minikube]
+
 - name: "[2/8] Verify CoreDNS health, disable legacy gVisor addon, and map control-plane.minikube.internal"
   ansible.builtin.shell: |
     set -euo pipefail

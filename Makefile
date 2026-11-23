@@ -60,19 +60,25 @@ status:
 	@kubectl get pods -A 2>/dev/null || true
 
 # Testkube test execution targets
+DURATION ?=
+QPS ?=
+TARGET_URL ?=
+TK_CFG = $(if $(DURATION),--config duration=$(DURATION)) $(if $(QPS),--config qps=$(QPS)) $(if $(TARGET_URL),--config targetUrl=$(TARGET_URL))
+
 test-security:
 	@echo "==> Triggering Testkube Security & Red-Team Audit Workflow..."
-	@testkube run tw agent-sandbox-security-audit -f
+	@testkube run tw agent-sandbox-security-audit $(TK_CFG) $(ARGS) -f
 
 test-benchmark:
 	@echo "==> Triggering Testkube Benchmark Workflow..."
-	@testkube run tw agent-sandbox-benchmark -f
+	@testkube run tw agent-sandbox-benchmark $(TK_CFG) $(ARGS) -f
 
 test-load:
 	@echo "==> Triggering Testkube Sustained Load Workflow..."
-	@testkube run tw agent-sandbox-sustained-load -f
+	@testkube run tw agent-sandbox-sustained-load $(TK_CFG) $(ARGS) -f
 
 # Teardown local cluster
 clean:
 	@echo "==> Deleting Minikube cluster nodes..."
 	@minikube delete 2>/dev/null || true
+	@rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml
