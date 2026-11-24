@@ -876,14 +876,14 @@ else
     assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 1
 fi
 
-# Matrix Flows 2-5 Test: 00_host_prep_{ubuntu,rocky}.yml guard Docker service and group behind presence audits
-if grep -q "docker_daemon_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
-   grep -q "docker_daemon_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
-   grep -q "user_docker_group_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
-   grep -q "user_docker_group_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
-    assert_test "privilege guard: Docker service & group tasks guarded behind presence audits to avoid unneeded sudo" 0
+# Matrix Flows 2-5 Test: 00_host_prep_{ubuntu,rocky}.yml guard Docker service and group behind native Ansible facts
+if grep -q "docker_service_active_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "docker_service_active_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "user_in_docker_group_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "user_in_docker_group_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
+    assert_test "privilege guard: Docker service & group tasks guarded behind native Ansible facts to avoid unneeded sudo" 0
 else
-    assert_test "privilege guard: Docker service & group tasks guarded behind presence audits to avoid unneeded sudo" 1
+    assert_test "privilege guard: Docker service & group tasks guarded behind native Ansible facts to avoid unneeded sudo" 1
 fi
 
 # Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml guards systemd Docker activation against non-init container test runners
@@ -1381,6 +1381,21 @@ if grep -q "SANDBOX_COUNT" "${REPO_ROOT}/Makefile" && \
 else
     assert_test "Makefile: SANDBOX_COUNT, CODE_VERSION, or FORCE_FRESH missing" 1
 fi
+
+# Verify Stage 0 tasks use native Ansible (getent, set_fact, group, user, service_facts) to check and add invoking user to docker group BEFORE checking Docker daemon service status
+for task_file in "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; do
+    bname="$(basename "$task_file")"
+    getent_line=$(grep -n "ansible.builtin.getent:" "$task_file" | head -n1 | cut -d: -f1)
+    grp_line=$(grep -n "Add invoking user to docker group" "$task_file" | head -n1 | cut -d: -f1)
+    svc_line=$(grep -n "ansible.builtin.service_facts:" "$task_file" | head -n1 | cut -d: -f1)
+    if [ -n "$getent_line" ] && [ -n "$grp_line" ] && [ -n "$svc_line" ] && \
+       [ "$getent_line" -lt "$grp_line" ] && [ "$grp_line" -lt "$svc_line" ] && \
+       grep -q "getent_group" "$task_file"; then
+        assert_test "tasks/${bname}: natively queries getent_group (line ${getent_line}) and adds user to docker group (line ${grp_line}) BEFORE service_facts daemon check (line ${svc_line})" 0
+    else
+        assert_test "tasks/${bname}: natively queries getent_group and adds user to docker group BEFORE service_facts daemon check" 1
+    fi
+done
 
 # ==============================================================================
 # Summary Report

@@ -129,7 +129,7 @@ jobs:
           ./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
 
   # ============================================================================
-  # Debian Linux Container: Debian 12 Bookworm (apt + non-root sudo tty_tickets)
+  # Debian Linux Container: Debian 13 Trixie (apt + non-root sudo tty_tickets)
   # ============================================================================
   debian-apt-matrix-test:
     name: ${{ matrix.name }}
@@ -138,12 +138,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "Debian 12 Bookworm (x86_64 / apt & non-root sudo)"
+          - name: "Debian 13 Trixie (x86_64 / apt & non-root sudo)"
             os: ubuntu-latest
-          - name: "Debian 12 Bookworm (aarch64 / apt & non-root sudo)"
+          - name: "Debian 13 Trixie (aarch64 / apt & non-root sudo)"
             os: ubuntu-24.04-arm
     container:
-      image: debian:bookworm
+      image: debian:trixie
     steps:
       - name: Install Base Utilities & Configure Non-Root Sudo User (tty_tickets)
         run: |
@@ -174,7 +174,7 @@ jobs:
             echo \"PASS: Debian non-root tty_tickets sudo mode & --ask-become-pass verified!\"
           '"
 
-      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight & Unit Test Suite on Debian 12
+      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight & Unit Test Suite on Debian 13
         run: |
           chmod +x k8s-agent-sandbox/scripts/bootstrap_cluster.sh k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
           ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only

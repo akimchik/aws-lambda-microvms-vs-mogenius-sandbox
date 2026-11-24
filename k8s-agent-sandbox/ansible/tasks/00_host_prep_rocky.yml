@@ -352,14 +352,63 @@
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
-- name: "[0/8 Rocky] Check if Docker daemon is already active"
-  ansible.builtin.shell: |
-    docker info >/dev/null 2>&1 && echo "ACTIVE" || echo "INACTIVE"
-  args:
-    executable: /bin/bash
-  register: docker_daemon_check_rocky
-  changed_when: false
+- name: "[0/8 Rocky] Query system group database (/etc/group) via native getent"
+  ansible.builtin.getent:
+    database: group
+    split: ":"
   check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Rocky] Evaluate target user and docker group membership facts"
+  ansible.builtin.set_fact:
+    target_docker_user_rocky: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
+    user_in_docker_group_rocky: >-
+      {{
+        ('docker' in (ansible_facts['getent_group'] | default({}))) and
+        (
+          (lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true))
+          in ((ansible_facts['getent_group']['docker'][2] | default('')).split(','))
+        )
+      }}
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Rocky] Ensure docker group exists"
+  ansible.builtin.group:
+    name: docker
+    state: present
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - not (dry_run_mode | bool)
+    - not (user_in_docker_group_rocky | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Add invoking user to docker group (secure group membership)"
+  ansible.builtin.user:
+    name: "{{ target_docker_user_rocky }}"
+    groups: docker
+    append: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - not (dry_run_mode | bool)
+    - not (user_in_docker_group_rocky | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Gather native systemd service facts"
+  ansible.builtin.service_facts:
+  check_mode: false
+  failed_when: false
+  when: ansible_facts['service_mgr'] == 'systemd'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Rocky] Evaluate whether Docker daemon service is active"
+  ansible.builtin.set_fact:
+    docker_service_active_rocky: >-
+      {{
+        (
+          (ansible_facts.get('services', {}).get('docker.service', {}).get('state', '') == 'running') or
+          (ansible_facts.get('services', {}).get('docker', {}).get('state', '') == 'running')
+        )
+      }}
   tags: [always, preflight, host-prep]
 
 - name: "[0/8 Rocky] Enable and start Docker service"
@@ -373,38 +422,7 @@
   when:
     - ansible_facts['service_mgr'] == 'systemd'
     - not (dry_run_mode | bool)
-    - "'INACTIVE' in (docker_daemon_check_rocky.stdout | default('INACTIVE'))"
-  tags: [preflight, host-prep]
-
-- name: "[0/8 Rocky] Check if user is already in docker group"
-  ansible.builtin.shell: |
-    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
-  args:
-    executable: /bin/bash
-  register: user_docker_group_check_rocky
-  changed_when: false
-  check_mode: false
-  tags: [always, preflight, host-prep]
-
-- name: "[0/8 Rocky] Ensure docker group exists"
-  ansible.builtin.group:
-    name: docker
-    state: present
-  become: "{{ ansible_facts['user_id'] != 'root' }}"
-  when:
-    - not (dry_run_mode | bool)
-    - "'NOT_IN_GROUP' in (user_docker_group_check_rocky.stdout | default('NOT_IN_GROUP'))"
-  tags: [preflight, host-prep]
-
-- name: "[0/8 Rocky] Add invoking user to docker group (secure group membership)"
-  ansible.builtin.user:
-    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
-    groups: docker
-    append: yes
-  become: "{{ ansible_facts['user_id'] != 'root' }}"
-  when:
-    - not (dry_run_mode | bool)
-    - "'NOT_IN_GROUP' in (user_docker_group_check_rocky.stdout | default('NOT_IN_GROUP'))"
+    - not (docker_service_active_rocky | bool)
   tags: [preflight, host-prep]
 
 - name: "[0/8 Rocky] Verify Docker container runtime is available on host"

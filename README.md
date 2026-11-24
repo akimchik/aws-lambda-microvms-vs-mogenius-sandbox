@@ -158,21 +158,21 @@ The distinct images add up to only ~2.8 GB as reported by `crictl`; the rest is 
 
 To eliminate typing long nested script paths or memorizing CLI flags, the root [`Makefile`](Makefile) provides unified shortcuts for every stage of development, testing, and cluster lifecycle management:
 
-| Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile |
-| :--- | :--- | :--- | :--- |
-| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, platform & arch matrix |
-| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit |
-| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) |
-| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) |
-| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods |
-| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows |
-| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) |
-| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) |
-| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) |
+| Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile | Privilege (`sudo` / `BECOME`) Required |
+| :--- | :--- | :--- | :--- | :--- |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, platform & arch matrix | ❌ No |
+| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit | ❌ No |
+| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
+| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |
+| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods | ❌ No |
+| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows | ❌ No |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) | ❌ No |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) | ❌ No |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) | ❌ No |
 
 > [!NOTE]
 > **Privilege Escalation & Sudo Model:**
-> Standard cluster reconciliation runs **100% in user space** with zero root requirements and zero password prompts. Host `/etc/sysctl.d` and PAM file limit modifications are strictly opt-in (`--configure-host-sysctl`). For the complete architectural breakdown of the sudo keepalive loop, privilege boundaries, and CLI options, see the **[Privilege Escalation & Sudo Lifecycle Guide](docs/MULTI_OS_SETUP_GUIDE.md#privilege-escalation-sudo-lifecycle--security-model)** in the Multi-OS Setup Guide.
+> Stages 1–8 (Minikube, gVisor, Helm releases, mogenius, Testkube) run **100% in user space** with zero root requirements. In Stage 0 (`[0/8]`), `sudo` (`BECOME password:`) is required on Linux **only** when installing missing CLI tools/Docker to `/usr/local/bin`, starting `docker.service` if stopped, adding the invoking user to the `docker` group (`/etc/group`) via native Ansible (`ansible.builtin.getent` + `ansible.builtin.user`), or when `--configure-host-sysctl` is explicitly passed. Once prerequisites and `docker` group membership are in place, `make cluster` and `make preflight` require **zero sudo calls and zero password prompts**. For the full breakdown, see the **[Privilege Escalation & Sudo Lifecycle Guide](docs/MULTI_OS_SETUP_GUIDE.md#privilege-escalation-sudo-lifecycle--security-model)** in the Multi-OS Setup Guide.
 
 ---
 

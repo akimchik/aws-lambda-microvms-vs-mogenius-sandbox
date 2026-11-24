@@ -24,16 +24,18 @@ This guide provides end-to-end instructions for provisioning and running the **2
 
 To ensure secure, non-destructive execution across local developer workstations and shared CI/CD runners, the bootstrapper ([`k8s-agent-sandbox/scripts/bootstrap_cluster.sh`](../k8s-agent-sandbox/scripts/bootstrap_cluster.sh)) and Ansible reconciler ([`k8s-agent-sandbox/ansible/playbooks/site.yml`](../k8s-agent-sandbox/ansible/playbooks/site.yml)) operate under a strict **least-privilege boundary**:
 
-### 1. The Zero-Root Default Boundary
-* **No Sudo for Kubernetes:** Minikube (Docker driver), Helm charts, mogenius controller, gVisor sandboxes, and Testkube all execute entirely within unprivileged user space. They **never** require root privileges or Ansible `become: true`.
-* **Standard Bootstrap Runs:** When all required CLI tools are present, the bootstrapper runs **100% as the unprivileged user** with zero sudo calls and zero password prompts.
+### 1. The Least-Privilege Boundary (Stages 1–8 User Space vs. Stage 0 Host Prep)
+* **No Sudo for Kubernetes (Stages 1–8):** Minikube (Docker driver), Helm charts, mogenius controller, gVisor sandboxes, and Testkube all execute entirely within unprivileged user space. Stages 1–8 **never** require root privileges or Ansible `become: true`.
+* **When Stage 0 (`[0/8]`) Requires `sudo` (`BECOME password:`):** On a clean Linux machine where CLI tools (`kubectl`, `minikube`, `helm`, `testkube`), Docker Engine, or the invoking user's `docker` group membership (`/etc/group`) are not yet configured, Stage 0 requires `sudo` (`become: true`) once to provision those host prerequisites. Once tools are installed and the user is in the `docker` group with `docker.service` running, subsequent runs execute **100% as the unprivileged user** with zero sudo calls and zero password prompts.
 
-### 2. Privilege Need Detection (`host_needs_privilege`)
-Root privileges are strictly confined to machine-level prerequisites:
-* **Toolchain bootstrap:** Installing `ansible-core` or missing CLI binaries (`kubectl`, `minikube`, `helm`, `testkube`) into `/usr/local/bin` when not writable.
-* **Kernel sysctl:** Applying high-concurrency open file descriptor and inotify limits (`/etc/sysctl.d`, `/etc/security/limits.d`).
+### 2. Privilege Need Detection (`host_needs_privilege`) & When a `sudo` Password Is Required
+Root privileges (`BECOME password:` / `sudo`) are strictly confined to **Stage 0 (`[0/8]`) machine-level prerequisites**:
+1. **Toolchain & Docker Engine bootstrap:** Installing `ansible-core`, base utilities (`curl`, `jq`, `tar`, `bzip2`, `openssl`), missing CLI binaries (`kubectl`, `minikube`, `helm`, `testkube`) into `/usr/local/bin` when not writable by the current user, or installing the `docker` package via `apt` / `dnf`.
+2. **Docker group membership (`ansible.builtin.getent`, `ansible.builtin.group` & `ansible.builtin.user`):** Stage 0 natively queries `/etc/group` via `ansible.builtin.getent` (`ansible_facts['getent_group']['docker']`). If the current user does not yet belong to the `docker` system group, Ansible **requires `sudo` (`become: true`)** to ensure the `docker` group exists and append the user to `/etc/group` **before** evaluating `ansible.builtin.service_facts` or verifying the Docker daemon. Without membership in the `docker` group, `/var/run/docker.sock` (`root:docker`, `0660`) rejects unprivileged connections and Minikube (`--driver=docker`) cannot run in user space.
+3. **Docker systemd service activation (`ansible.builtin.systemd`):** If `docker.service` is stopped or disabled on a Linux `systemd` host, `sudo` is required to start and enable the unit.
+4. **Kernel sysctl (`--configure-host-sysctl`):** Applying persistent high-concurrency open file descriptor and inotify limits (`/etc/sysctl.d`, `/etc/security/limits.d`).
 
-If all CLI tools are detected in `$PATH` and `--configure-host-sysctl` is not passed, `host_needs_privilege` evaluates to `false` and privilege escalation is completely bypassed.
+If all CLI tools are present in `$PATH`, the `docker` daemon is active, the user is already a member of the `docker` group, and `--configure-host-sysctl` is not passed, `host_needs_privilege` evaluates to `false` and privilege escalation is completely bypassed.
 
 ### 3. Sudo Lifecycle Flowchart
 ```
@@ -41,42 +43,49 @@ If all CLI tools are detected in `$PATH` and `--configure-host-sysctl` is not pa
                             │
                             ▼
                   host_needs_privilege()?
-                    ├── Base tools missing? (curl, jq, tar)
+                    ├── Base tools or Docker missing? (curl, jq, tar, openssl, docker)
                     ├── CLIs missing & /usr/local/bin read-only?
+                    ├── User not in 'docker' group or docker.service inactive?
                     └── --configure-host-sysctl passed?
                             │
                ┌────────────┴────────────┐
                ▼                         ▼
          [ FALSE ]                   [ TRUE ]
-       (Tools present)           (Tools missing)
+       (Tools & group ready)       (Setup required)
                │                         │
-               ▼                         ├── sudo -n true? (Active session in cache)
+               ▼                         ├── sudo -n true? (Passwordless or cached sudo)
        Zero Sudo Invocations             │    ├── YES ──► Continue without prompting
-       Zero BECOME Prompts               │    └── NO  ──► Prompt sudo -v ONCE in bash
-       Ansible runs as USER              │                 Start 50s keepalive loop
+       Zero BECOME Prompts               │    └── NO  ──► Pass --ask-become-pass to Stage 0
+       Ansible runs as USER              │                 (Prompts for BECOME password)
                                          ▼
-                               Ansible runs as USER
-                               Installs binaries to /usr/local/bin
+                               Stage 0 (Ansible become: true)
+                                 • Installs missing tools/Docker to /usr/local/bin
+                                 • Adds user to 'docker' group BEFORE checking daemon
+                                 • Starts docker.service if inactive
+                                         │
+                                         ▼
+                               Stages 1-8 run 100% as USER (Zero become)
 ```
 
-### 4. Background Sudo Session Keepalive
-When host tool installation requires elevated privileges, the bootstrapper authenticates once in bash via `sudo -v` and launches a lightweight background keepalive loop:
-```bash
-( while sudo -n true 2>/dev/null; do sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
-```
-This pings `sudo -n true` every 50 seconds to keep the kernel credential timestamp valid for the duration of the reconciliation, preventing mid-run credential timeouts or broken non-interactive executions without ever passing credentials over insecure channels.
+### 4. Automatic `BECOME password:` Prompting on Debian / Ubuntu / RHEL (`tty_tickets`)
+On Linux distributions where `sudo` enforces per-TTY timestamp tickets (`Defaults tty_tickets`, the default on Debian 12/13 and Ubuntu), authenticating `sudo -v` in a parent shell does not transfer across Ansible's Python subprocesses. Therefore:
+* When `host_needs_privilege` is `true` and passwordless sudo (`sudo -n true`) is not active, `bootstrap_cluster.sh` automatically passes `--ask-become-pass` to Stage 0 (`ansible-playbook --tags preflight`) so Ansible prompts cleanly for `BECOME password:` once and applies `docker` group membership, tool installation, and service startup.
+* When a cached sudo ticket is available, a background keepalive loop refreshes it every 50 seconds:
+  ```bash
+  ( while sudo -n true 2>/dev/null; do sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
+  ```
 
 ### 5. Host Kernel Tweaks (`--configure-host-sysctl`) are Strictly Opt-In
 Host kernel parameter changes (`/etc/sysctl.d/99-kubernetes-sandbox.conf`, PAM limits, systemd `DefaultLimitNOFILE`) modify host system state. To avoid unwanted host mutations on developer workstations:
-* Ansible defaults `configure_linux_sysctl` to `false` (`-e configure_linux_sysctl=false`).
-* Tasks affecting `/etc/sysctl.d` are skipped on standard runs.
+* `bootstrap_cluster.sh` passes `-e configure_linux_sysctl=false` by default unless `--configure-host-sysctl` is specified.
+* Tasks affecting `/etc/sysctl.d` are skipped on standard runs (while in-node Minikube sysctls are always tuned automatically in Stage 1).
 * To explicitly apply host-level kernel limits, pass the flag:
   ```bash
   ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --configure-host-sysctl
   ```
 
 ### 6. Explicit Ansible Privilege Escalation (`-K` / `--ask-become-pass`)
-Ansible will **never** prompt for `BECOME password:` by default. Only pass `-K` if you are executing custom playbooks or running in restricted root-only environments:
+When all tools and `docker` group membership are already configured, Ansible never prompts for `BECOME password:`. You can also force a `BECOME password:` prompt at any time by passing `-K`:
 ```bash
 ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh -K
 ```
@@ -89,12 +98,12 @@ To avoid having to type long nested script paths or memorize CLI flags, the root
 
 ### ⚡ Developer Makefile Cheatsheet vs. Direct Scripts
 
-| Goal / Stage | Make Target (Recommended) | Direct Script Command | Profile / Sizing | Privilege Required |
+| Goal / Stage | Make Target (Recommended) | Direct Script Command | Profile / Sizing | Privilege (`sudo` / `BECOME`) Required |
 | :--- | :--- | :--- | :--- | :--- |
 | **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, arch matrix | ❌ No |
 | **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, sizing audit | ❌ No |
-| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) | ⚠️ Only if missing |
-| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) | ❌ No (User space) |
+| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
+| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |
 | **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods | ❌ No |
 | **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows | ❌ No |
 | **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) | ❌ No |
@@ -105,16 +114,16 @@ To avoid having to type long nested script paths or memorize CLI flags, the root
 
 The CLI wrapper `bootstrap_cluster.sh` delegates all 8 reconciliation layers to `ansible-playbook`. It supports several operational modes:
 
-| Flag | Mode | Description | Privilege Required |
+| Flag | Mode | Description | Privilege (`sudo` / `BECOME`) Required |
 | :--- | :--- | :--- | :--- |
-| *(default)* | Full Reconcile | Converges all 8 layers: host prep, 2-node cluster, gVisor, Ingress, monitoring, mogenius, Testkube, and verification. | ❌ No (User space) |
+| *(default)* | Full Reconcile | Converges all 8 layers: Stage 0 host prep (`[0/8]`) followed by Stages 1–8 (2-node cluster, gVisor, Ingress, monitoring, mogenius, Testkube, verification). | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` inactive, or user not in `docker` group**; ❌ No (user space) once configured |
 | `--dry-run` | Read-Only Audit | Runs `ansible-playbook --check --diff --tags preflight`. Evaluates host tools and sizing with **0 mutations**. | ❌ No (Read-only) |
-| `--preflight-only` | Preflight Discovery | Audits and installs missing host OS toolchains (`[0/8]`), then exits before creating or modifying Minikube. | ⚠️ Only if tools missing |
-| `--upgrade-helm` | Force Helm Upgrade | Upgrades existing Helm releases (`monitoring`, `mogenius`, `testkube`) even if versions match. | ❌ No (User space) |
-| `--configure-host-sysctl` | Host Kernel Tuning | Applies kernel inotify and open file descriptor limits to `/etc/sysctl.d` and PAM. | 🔑 Yes (sudo) |
-| `--ci` | Low-Resource CI Mode | Sizes Minikube cluster for 2 vCPUs and 4,096 MB RAM (for GitHub Actions runners). | ❌ No (User space) |
-| `--memory <MB>` | Custom Sizing | Sets custom primary node memory ceiling in MB (e.g. `--memory 6144`, min: 2048). | ❌ No (User space) |
-| `-K`, `--ask-become-pass` | Ansible Become Pass | Prompts for privilege escalation password at Ansible launch. | 🔑 Yes |
+| `--preflight-only` | Preflight Discovery | Audits and configures missing host OS toolchains, Docker service, and `docker` group membership (`[0/8]`), then exits before Minikube. | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` inactive, or user not in `docker` group**; ❌ No once configured |
+| `--upgrade-helm` | Force Helm Upgrade | Upgrades existing Helm releases (`monitoring`, `mogenius`, `testkube`) even if versions match. | ⚠️ Only if Stage 0 prerequisites are missing; ❌ No (user space) otherwise |
+| `--configure-host-sysctl` | Host Kernel Tuning | Applies kernel inotify and open file descriptor limits to `/etc/sysctl.d` and PAM. | 🔑 **Yes (`sudo` always required)** |
+| `--ci` | Low-Resource CI Mode | Sizes Minikube cluster for 2 vCPUs and 4,096 MB RAM (for GitHub Actions runners). | ⚠️ Only if Stage 0 prerequisites are missing; ❌ No otherwise |
+| `--memory <MB>` | Custom Sizing | Sets custom primary node memory ceiling in MB (e.g. `--memory 6144`, min: 2048). | ⚠️ Only if Stage 0 prerequisites are missing; ❌ No otherwise |
+| `-K`, `--ask-become-pass` | Ansible Become Pass | Explicitly forces Ansible `BECOME password:` prompt at launch (auto-enabled on Linux when `sudo` requires a password and `host_needs_privilege` is true). | 🔑 **Yes (`BECOME password:` prompt)** |
 | `-h`, `--help` | Help Menu | Displays CLI options and usage examples. | ❌ No |
 
 ---
