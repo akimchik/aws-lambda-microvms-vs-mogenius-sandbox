@@ -265,15 +265,16 @@ main() {
     audit_and_tune_linux_inotify
     build_ansible_args
 
-    # Stage 0: Host OS, Kernel Sysctl & Toolchain Preparation (up to 3 attempts if SUDO password has a typo)
+    # Stage 0: Host OS, Kernel Sysctl & Toolchain Preparation (up to 3 attempts if BECOME password has a typo)
     local attempt=1
+    local extra_become_check=()
     if [[ " ${ANSIBLE_ARGS[*]} " == *" --ask-become-pass "* ]]; then
-        echo -e "  ${CYAN}[>]${NC} Please, enter SUDO password for full privileged access (attempt 1/3):"
+        extra_become_check=(-e "verify_become_immediately=true")
     fi
-    while ! ansible-playbook "${ANSIBLE_ARGS[@]}" --tags preflight -e "preflight_only_mode=true"; do
+    while ! ansible-playbook "${ANSIBLE_ARGS[@]}" "${extra_become_check[@]}" --tags preflight -e "preflight_only_mode=true"; do
         if [[ " ${ANSIBLE_ARGS[*]} " == *" --ask-become-pass "* ]] && [ "$attempt" -lt 3 ]; then
             attempt=$((attempt + 1))
-            echo -e "  ${YELLOW}[!]${NC} Authentication failed. Please, enter SUDO password for full privileged access (attempt ${attempt}/3):"
+            echo -e "  ${YELLOW}[!]${NC} Authentication failed (attempt $((attempt - 1))/3). Retrying (attempt ${attempt}/3)..."
         else
             exit 1
         fi
