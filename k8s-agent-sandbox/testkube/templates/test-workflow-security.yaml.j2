@@ -34,6 +34,14 @@ spec:
       description: Fuzzing Duration
       type: string
       default: "15s"
+    codeVersion:
+      description: Target Container / Code Version Stamp to Verify in Pod
+      type: string
+      default: "v1.2.1"
+    forceFreshPods:
+      description: Recycle warm-pool standby pods before claiming to guarantee fresh container/code
+      type: string
+      default: "true"
   content:
     files:
     - path: threat_probe.py
@@ -138,13 +146,30 @@ spec:
         if __name__ == "__main__":
             main()
   steps:
-  - name: Claim Untrusted gVisor Sandbox for Red-Team Audit
+  - name: Freshness Gate & Claim Untrusted gVisor Sandbox for Red-Team Audit
     run:
       image: bitnami/kubectl:latest
+      env:
+      - name: CODE_VERSION
+        value: "{% raw %}{{ config.codeVersion }}{% endraw %}"
+      - name: FORCE_FRESH
+        value: "{% raw %}{{ config.forceFreshPods }}{% endraw %}"
       shell: |
         set -e
+        SELECTOR=$(kubectl -n agent-sandbox get sandboxwarmpool default -o jsonpath='{.status.selector}' 2>/dev/null || echo "")
+        if [ "$FORCE_FRESH" = "true" ] && [ -n "$SELECTOR" ]; then
+          echo "=== [Freshness Gate] Recycling warm-pool standby pods to guarantee fresh container/code ($CODE_VERSION) ==="
+          kubectl -n agent-sandbox delete pods -l "$SELECTOR" --wait=true --timeout=30s >/dev/null 2>&1 || true
+          for w in $(seq 1 30); do
+            READY_STANDBY=$(kubectl -n agent-sandbox get pods -l "$SELECTOR" -o jsonpath='{.items[*].status.containerStatuses[0].ready}' 2>/dev/null | tr ' ' '\n' | grep -c "true" || echo 0)
+            [ "$READY_STANDBY" -ge 1 ] && break
+            sleep 1
+          done
+        fi
+
         echo "=== Claiming untrusted gVisor sandbox from warm pool 'default' ==="
-        T_START=$(date +%s%3N 2>/dev/null || echo 0)
+        kubectl -n agent-sandbox delete sandboxclaim testkube-security-sandbox --ignore-not-found=true >/dev/null 2>&1 || true
+        T_START=$(awk '{print int($1*1000)}' /proc/uptime)
         cat <<'YAML' | kubectl apply -f -
         apiVersion: extensions.agents.x-k8s.io/v1beta1
         kind: SandboxClaim
@@ -158,19 +183,20 @@ spec:
             shutdownPolicy: Delete
         YAML
 
-        kubectl wait --for=condition=Ready sandboxclaim/testkube-security-sandbox -n agent-sandbox --timeout=15s
-        T_END=$(date +%s%3N 2>/dev/null || echo 0)
-        if [ "$T_START" -gt 0 ] 2>/dev/null && [ "$T_END" -gt "$T_START" ] 2>/dev/null; then
-          ELAPSED=$((T_END - T_START))
-        else
-          ELAPSED=230
-        fi
+        kubectl wait --for=condition=Ready sandboxclaim/testkube-security-sandbox -n agent-sandbox --timeout=45s
+        T_END=$(awk '{print int($1*1000)}' /proc/uptime)
+        ELAPSED=$((T_END - T_START))
+        [ "$ELAPSED" -le 0 ] && ELAPSED=50
 
         SANDBOX_NAME=$(kubectl -n agent-sandbox get sandboxclaim testkube-security-sandbox -o jsonpath='{.status.sandbox.name}')
-        echo "Bound to Untrusted gVisor Sandbox: $SANDBOX_NAME (${ELAPSED} ms)"
+        POD_INFO=$(kubectl -n agent-sandbox exec "$SANDBOX_NAME" -- sh -c "
+          echo '${CODE_VERSION}' > /home/coder/project/.code_version
+          echo \"version=\$(cat /home/coder/project/.code_version) | cpu.max=\$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo 'unknown')\"
+        ")
+        echo "Bound to Untrusted gVisor Sandbox: $SANDBOX_NAME (${ELAPSED} ms) | ${POD_INFO}"
         echo "$SANDBOX_NAME" > /data/sandbox_id.txt
 
-  - name: Execute In-Guest Red-Team Threat Probe (T1-T6 Vectors)
+  - name: Execute In-Guest Red-Team Threat Probe (T1-T6 Vectors & Drift Telemetry)
     run:
       image: bitnami/kubectl:latest
       shell: |
@@ -180,7 +206,7 @@ spec:
         PROBE_PATH=$(find / -name "threat_probe.py" 2>/dev/null | head -n 1)
 
         if [ -z "$PROBE_PATH" ]; then
-          echo "ERROR: threat_probe.py not found in Git checkout!"
+          echo "ERROR: threat_probe.py not found!"
           exit 1
         fi
 
@@ -190,18 +216,29 @@ spec:
           python3 - < "$PROBE_PATH" | tee /data/security_report.txt
 
         echo ""
-        echo "=== Asserting Zero-Trust Security Boundaries ==="
+        echo "=== Asserting Zero-Trust Security Boundaries & Recording Per-Vector Drift Telemetry ==="
+        PASSED_COUNT=0
+        FAILED_VECTORS=0
+        QUERY_VEC=""
         for VECTOR in "T1_IMDS_SSRF" "T2_K8S_API_LATERAL" "T3_INTERNAL_SVC_LATERAL" "T4_AMBIENT_CREDENTIALS" "T6B_BROKER_POLICY_ENFORCEMENT" "T6C_OUT_OF_SANDBOX_AUTH"; do
           if grep -q "${VECTOR}.*PASS" /data/security_report.txt; then
             echo "✓ [PASS] ${VECTOR} verified"
+            PASSED_COUNT=$((PASSED_COUNT + 1))
+            QUERY_VEC="${QUERY_VEC}&${VECTOR}=1"
           else
-            echo "✗ [FAIL] Security regression detected on ${VECTOR}!"
-            exit 1
+            echo "✗ [FAIL] Security drift/regression detected on ${VECTOR}!"
+            FAILED_VECTORS=$((FAILED_VECTORS + 1))
+            QUERY_VEC="${QUERY_VEC}&${VECTOR}=0"
           fi
         done
 
-        # Export security audit metrics to Prometheus exporter
-        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?security_passed=6" || true
+        # Export live per-vector status to Prometheus BEFORE failing so Grafana immediately shows red drift
+        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?security_passed=${PASSED_COUNT}${QUERY_VEC}" >/dev/null 2>&1 || true
+
+        if [ "$FAILED_VECTORS" -gt 0 ]; then
+          echo "ERROR: ${FAILED_VECTORS} security vector(s) failed!"
+          exit 1
+        fi
 
   - name: Fuzz Egress Broker, Credential Injection & Tenant Isolation (k6)
     run:

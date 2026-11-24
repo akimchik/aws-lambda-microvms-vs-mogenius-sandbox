@@ -60,11 +60,82 @@ make test-security
 
 # 3. Run the High-Throughput Sustained Load Benchmark (70 RPS targeting active sandbox without restarts)
 make test-load
-# (Or custom 2-minute run: make test-load DURATION=2m QPS=100)
+# (Or custom 2-minute Scaled-Out run across 3 sandboxes: make test-load DURATION=2m QPS=100 SANDBOX_COUNT=3)
 
 # 4. Inspect past executions
 testkube get twe
 ```
+
+---
+
+## 🎬 Live Demo Choreography: Drift Detection, Container Freshness, Scale-Up & Scale-Out
+
+Use this 4-act sequence during live presentations to demonstrate container/code freshness guarantees, security drift detection & self-healing, vertical scaling (**Scaled-Up**), and horizontal warm-pool scaling (**Scaled-Out**):
+
+### Act 1: Fresh Container / Code Rollout Proof (`FORCE_FRESH=true`)
+Every test run enforces a **Freshness Gate** (`forceFreshPods=true` by default on `test-benchmark` and `test-security`), which evicts pre-existing warm-pool standby pods, waits for fresh standby pods, stamps `CODE_VERSION` into `/home/coder/project/.code_version`, and audits live Linux cgroup v2 limits (`/sys/fs/cgroup/cpu.max` and `/sys/fs/cgroup/memory.max`):
+
+```bash
+make test-benchmark CODE_VERSION=v2.1.0-fresh FORCE_FRESH=true QPS=60 DURATION=15s
+```
+
+### Act 2: Simulating Live Security Drift & Self-Healing
+1. **Inject Security Drift** (temporarily whitelist `example.com` in `egress-broker` and restart the broker process):
+   ```bash
+   kubectl -n sandbox-egress-system get configmap egress-broker-code -o yaml | \
+     sed 's/"raw.githubusercontent.com"/"raw.githubusercontent.com", "example.com"/' | \
+     kubectl apply -f -
+   kubectl -n sandbox-egress-system rollout restart deployment/egress-broker
+   kubectl -n sandbox-egress-system rollout status deployment/egress-broker
+   ```
+2. **Detect Drift in Testkube & Grafana:**
+   ```bash
+   make test-security
+   ```
+   *Result:* `T6B_BROKER_POLICY_ENFORCEMENT` fails (`FAIL (EXPOSED)`), Testkube exits with failure, and the `T6B` vector panel in Grafana immediately turns **RED (`0`)**.
+3. **Self-Heal with Ansible Reconciler:**
+   ```bash
+   make cluster
+   make test-security
+   ```
+   *Result:* Ansible restores `egress-broker.yaml`, updates the SHA256 ConfigMap checksum annotation to roll the broker pod, and `make test-security` restores Grafana to **GREEN (`6/6`)**.
+
+### Act 3: Scaled-Up Mode (Vertical CPU & Memory Scaling)
+1. **Constrained Sandbox (`250m` CPU / `512Mi` RAM):**
+   ```bash
+   helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+     -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+     --set sandboxes.profiles.default.resources.limits.cpu=250m \
+     --set sandboxes.profiles.default.resources.limits.memory=512Mi
+   make test-benchmark CODE_VERSION=v1-constrained FORCE_FRESH=true QPS=60
+   ```
+   *Observe in Testkube logs:* `cpu.max=25000 100000` (0.25 vCPU ceiling) and elevated p95 latency under 60 QPS.
+2. **Scaled-Up Sandbox (`2` vCPUs / `2Gi` RAM):**
+   ```bash
+   helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+     -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+     --set sandboxes.profiles.default.resources.limits.cpu=2 \
+     --set sandboxes.profiles.default.resources.limits.memory=2Gi
+   make test-benchmark CODE_VERSION=v2-scaled-up FORCE_FRESH=true QPS=60
+   ```
+   *Observe in Testkube logs:* `cpu.max=200000 100000` (2.0 vCPU ceiling) and p95 latency `< 15ms`.
+
+### Act 4: Scaled-Out Mode (Horizontal Warm-Pool Scaling & Multi-Sandbox Fan-Out)
+1. **Under-Provisioned Warm Pool (`replicas=1`) vs. 3 Concurrent Claims (`SANDBOX_COUNT=3`):**
+   ```bash
+   make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-pool-1 QPS=90
+   ```
+   *Observe in Testkube logs & Grafana:* Claim `[1/3]` binds in `~220ms (warm)`, while Claims `[2/3]` and `[3/3]` experience `>2,500ms (cold)` startup drift because the warm pool only had 1 standby pod!
+2. **Scaled-Out Warm Pool (`replicas=3`) with 3 Concurrent Claims & Multi-Sandbox Round-Robin Load:**
+   ```bash
+   helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+     -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+     --set sandboxes.profiles.default.warmPool.replicas=3
+   kubectl -n agent-sandbox wait --for=condition=Ready pod --all --timeout=90s
+   make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-scaled-out-3 FORCE_FRESH=false QPS=90
+   make test-load SANDBOX_COUNT=3 DURATION=2m QPS=100
+   ```
+   *Observe in Testkube logs & Grafana:* All 3 claims bind in `<350ms (warm)`, and `k6` distributes 90–100 RPS round-robin across all 3 isolated gVisor sandboxes via `X-Sandbox-ID`.
 
 * **Dedicated Testkube & Security Grafana Dashboard:**
   * `http://grafana.127.0.0.1.nip.io/d/testkube-agent-benchmarks/testkube-agent-sandbox-benchmark-dashboard`

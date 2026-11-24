@@ -7,7 +7,7 @@
 
 - name: "[0/8 Rocky] Check if base utilities are installed (curl, tar, jq, bzip2, openssl)"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     for tool in curl tar jq bzip2 openssl; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "MISSING:$tool"
@@ -196,7 +196,7 @@
 # ------------------------------------------------------------------------------
 - name: "[0/8 Rocky] Audit host CLI tools (kubectl, minikube, helm, testkube, docker)"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     for tool in kubectl minikube helm testkube docker; do
       if command -v "$tool" >/dev/null 2>&1; then
         echo "PRESENT:$tool:$(command -v "$tool")"
@@ -214,7 +214,7 @@
 - name: "[0/8 Rocky] Install multi-arch kubectl if missing"
   ansible.builtin.shell: |
     set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     K8S_VER="{{ kubectl_version | default('latest') }}"
     if [ "$K8S_VER" = "latest" ]; then
       K8S_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo "{{ k8s_fallback_version }}")
@@ -233,7 +233,7 @@
 
 - name: "[0/8 Rocky] Check installed Minikube version"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     minikube version --short 2>/dev/null || minikube version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+' | head -n1 || echo "v0.0"
   args:
     executable: /bin/bash
@@ -257,7 +257,7 @@
 - name: "[0/8 Rocky] Install Helm v3 and Testkube CLI if missing"
   ansible.builtin.shell: |
     set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     export HELM_INSTALL_DIR="/usr/local/bin"
     if ! command -v helm >/dev/null 2>&1 && [ ! -f /usr/local/bin/helm ] && [ ! -f /usr/bin/helm ]; then
       if ! command -v openssl >/dev/null 2>&1; then
@@ -329,7 +329,7 @@
 - name: "[0/8 Rocky] Install Docker CE repository and packages via dnf/yum if missing"
   ansible.builtin.shell: |
     set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     if ! command -v docker >/dev/null 2>&1; then
       if [ ! -f /etc/yum.repos.d/docker-ce.repo ]; then
         curl -fsSL https://download.docker.com/linux/centos/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo 2>/dev/null || \
@@ -409,7 +409,7 @@
 
 - name: "[0/8 Rocky] Verify Docker container runtime is available on host"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     if ! command -v docker >/dev/null 2>&1; then
       echo "ERROR: Docker runtime is required by Minikube (--driver=docker) but 'docker' was not found in PATH."
       echo "Please install Docker CE: 'sudo dnf install -y docker-ce docker-ce-cli containerd.io'."

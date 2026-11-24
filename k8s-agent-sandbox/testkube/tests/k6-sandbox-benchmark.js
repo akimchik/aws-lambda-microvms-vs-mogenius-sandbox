@@ -29,35 +29,43 @@ const BASE_URL = __ENV.TARGET_URL;
 if (!BASE_URL) {
   throw new Error('FATAL: TARGET_URL environment variable is required. Example: TARGET_URL=http://$(minikube ip):80 k6 run ...');
 }
-const SANDBOX_ID = __ENV.SANDBOX_ID;
+const RAW_IDS = __ENV.SANDBOX_IDS || __ENV.SANDBOX_ID || '';
+const SANDBOX_LIST = RAW_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+if (SANDBOX_LIST.length === 0) {
+  throw new Error('FATAL: SANDBOX_ID or SANDBOX_IDS environment variable is required.');
+}
 const SANDBOX_NAMESPACE = 'agent-sandbox';
 const SANDBOX_PORT = '8080';
 
-const HEADERS = {
-  'Host': 'sandbox.127.0.0.1.nip.io',
-  'X-Sandbox-ID': SANDBOX_ID,
-  'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
-  'X-Sandbox-Port': SANDBOX_PORT,
-  'User-Agent': 'k6-testkube-benchmark',
-};
+function buildHeaders() {
+  const targetSandbox = SANDBOX_LIST[__ITER % SANDBOX_LIST.length];
+  return {
+    'Host': 'sandbox.127.0.0.1.nip.io',
+    'X-Sandbox-ID': targetSandbox,
+    'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
+    'X-Sandbox-Port': SANDBOX_PORT,
+    'User-Agent': 'k6-testkube-benchmark',
+  };
+}
 
 export default function () {
+  const headers = buildHeaders();
   const rand = Math.random();
   if (rand < 0.55) {
     // 55% Static Manifest
-    const res = http.get(`${BASE_URL}/manifest.json`, { headers: HEADERS });
+    const res = http.get(`${BASE_URL}/manifest.json`, { headers });
     const ok = check(res, { 'manifest is 200': (r) => r.status === 200 });
     successRate.add(ok);
     manifestLatency.add(res.timings.duration);
   } else if (rand < 0.85) {
     // 30% API Health
-    const res = http.get(`${BASE_URL}/healthz`, { headers: HEADERS });
+    const res = http.get(`${BASE_URL}/healthz`, { headers });
     const ok = check(res, { 'health is 200': (r) => r.status === 200 });
     successRate.add(ok);
     healthLatency.add(res.timings.duration);
   } else {
     // 15% Deliberate 404 Negative Test
-    const res = http.get(`${BASE_URL}/nonexistent-probe`, { headers: HEADERS });
+    const res = http.get(`${BASE_URL}/nonexistent-probe`, { headers });
     check(res, { 'nonexistent is 404': (r) => r.status === 404 });
   }
 }

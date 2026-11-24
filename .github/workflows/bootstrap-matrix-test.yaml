@@ -127,3 +127,55 @@ jobs:
         run: |
           chmod +x k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
           ./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
+
+  # ============================================================================
+  # Debian Linux Container: Debian 12 Bookworm (apt + non-root sudo tty_tickets)
+  # ============================================================================
+  debian-apt-matrix-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Debian 12 Bookworm (x86_64 / apt & non-root sudo)"
+            os: ubuntu-latest
+          - name: "Debian 12 Bookworm (aarch64 / apt & non-root sudo)"
+            os: ubuntu-24.04-arm
+    container:
+      image: debian:bookworm
+    steps:
+      - name: Install Base Utilities & Configure Non-Root Sudo User (tty_tickets)
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq make git bash tar bzip2 findutils sudo ruby python3-yaml python3-jinja2 ansible-core procps curl ca-certificates jq openssl
+          useradd -m -s /bin/bash debianuser
+          echo "debianuser:debianpass" | chpasswd
+          echo "Defaults tty_tickets" > /etc/sudoers.d/debianuser
+          echo "debianuser ALL=(ALL:ALL) ALL" >> /etc/sudoers.d/debianuser
+          chmod 0440 /etc/sudoers.d/debianuser
+
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Verify Non-Root Debian Sudo Mode Detection & Dry-Run Audit (tty_tickets active)
+        run: |
+          chown -R debianuser:debianuser .
+          su - debianuser -c "cd '$PWD' && ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run"
+          su - debianuser -c "cd '$PWD' && bash -c '
+            source ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
+            detect_platform
+            detect_sudo_mode
+            [ \"\$SUDO_NEEDS_PASS\" = true ] || { echo \"FAIL: SUDO_NEEDS_PASS not detected on Debian non-root\"; exit 1; }
+            CONFIGURE_HOST_SYSCTL=true
+            build_ansible_args
+            printf \"%s\n\" \"\${ANSIBLE_ARGS[@]}\" | grep -qx -- \"--ask-become-pass\" || { echo \"FAIL: --ask-become-pass missing on Debian tty_tickets\"; exit 1; }
+            echo \"PASS: Debian non-root tty_tickets sudo mode & --ask-become-pass verified!\"
+          '"
+
+      - name: Run Multi-OS & Multi-Arch Bootstrap Preflight & Unit Test Suite on Debian 12
+        run: |
+          chmod +x k8s-agent-sandbox/scripts/bootstrap_cluster.sh k8s-agent-sandbox/scripts/test_multios_bootstrap.sh
+          ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only
+          su - debianuser -c "cd '$PWD' && ./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh"

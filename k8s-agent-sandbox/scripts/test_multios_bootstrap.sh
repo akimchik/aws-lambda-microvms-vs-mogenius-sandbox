@@ -743,13 +743,15 @@ else
     assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 1
 fi
 
-# Regression Test: tasks/00_host_prep_darwin.yml dynamically resolves Homebrew prefix (arm64 /opt/homebrew vs x86_64 /usr/local)
+# Regression Test: tasks/00_host_prep_darwin.yml dynamically resolves Homebrew prefix (HOMEBREW_PREFIX / arm64 /opt/homebrew vs x86_64 /usr/local)
 if grep -q "brew_prefix:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   grep -q "HOMEBREW_PREFIX" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
    grep -q "/opt/homebrew" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   grep -q "/usr/local" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
    ! grep -q "become:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"; then
-    assert_test "tasks/00_host_prep_darwin.yml: resolves architecture-specific Homebrew prefix without sudo" 0
+    assert_test "tasks/00_host_prep_darwin.yml: resolves HOMEBREW_PREFIX and architecture-specific prefix without sudo" 0
 else
-    assert_test "tasks/00_host_prep_darwin.yml: resolves architecture-specific Homebrew prefix without sudo" 1
+    assert_test "tasks/00_host_prep_darwin.yml: resolves HOMEBREW_PREFIX and architecture-specific prefix without sudo" 1
 fi
 
 # Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml implements Docker CE installation and readiness verification
@@ -1304,6 +1306,80 @@ if ! grep -q "revision: main" "${K8S_DIR}/testkube/templates/"*.j2; then
     assert_test "Testkube templates: Hermetic self-contained content.files (no external GitHub main pinning)" 0
 else
     assert_test "Testkube templates: External GitHub revision: main pinning still present" 1
+fi
+
+# Verify cross-platform Linux/Debian sudo tty_tickets fix: build_ansible_args auto-appends --ask-become-pass when SUDO_NEEDS_PASS=true and host_needs_privilege is true
+(
+    HOST_PLATFORM="Linux"
+    MOCK_UID=1000
+    FORCE_ASK_BECOME=false
+    SUDO_NEEDS_PASS=true
+    CONFIGURE_HOST_SYSCTL=true
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = true ]
+) && assert_test "build_ansible_args(): Auto-appends --ask-become-pass on Debian/Linux (tty_tickets) when SUDO_NEEDS_PASS=true and host_needs_privilege=true" 0 || \
+   assert_test "build_ansible_args(): Auto-appends --ask-become-pass on Debian/Linux (tty_tickets) when SUDO_NEEDS_PASS=true and host_needs_privilege=true" 1
+
+# Verify Debian /usr/sbin:/sbin PATH inclusion in bootstrap_cluster.sh and Makefile
+if grep -q "/usr/sbin:/sbin" "${BOOTSTRAP_SCRIPT}" && grep -q "/usr/sbin:/sbin" "${REPO_ROOT}/Makefile"; then
+    assert_test "Debian PATH compatibility: /usr/sbin:/sbin exported in bootstrap_cluster.sh and Makefile" 0
+else
+    assert_test "Debian PATH compatibility: /usr/sbin:/sbin missing" 1
+fi
+
+# Verify values-mogenius.yaml warmPool.updateStrategy is set to Immediate
+if grep -q "updateStrategy: Immediate" "${K8S_DIR}/helm/values-mogenius.yaml"; then
+    assert_test "values-mogenius.yaml: warmPool.updateStrategy is Immediate (prevents stale standby pods)" 0
+else
+    assert_test "values-mogenius.yaml: warmPool.updateStrategy is not Immediate" 1
+fi
+
+# Verify testkube/rbac.yaml grants pod delete permission for Freshness Gate recycling
+if grep -A 10 'resources:' "${K8S_DIR}/testkube/rbac.yaml" | grep -q '"delete"'; then
+    assert_test "testkube/rbac.yaml: grants pod delete permission for Freshness Gate recycling" 0
+else
+    assert_test "testkube/rbac.yaml: pod delete permission missing" 1
+fi
+
+# Verify monitoring/sandbox-latency-exporter.yaml supports per-vector drift updates and cold/warm launch_type
+if grep -q 'launch_type="cold"' "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" && \
+   grep -q 'active_sandboxes' "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" && \
+   grep -q 'for vec in list(state\["vectors"\].keys())' "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml"; then
+    assert_test "monitoring/sandbox-latency-exporter.yaml: supports per-vector drift updates and cold/warm launch_type" 0
+else
+    assert_test "monitoring/sandbox-latency-exporter.yaml: per-vector drift or cold launch_type missing" 1
+fi
+
+# Verify TestWorkflow templates implement Freshness Gate (forceFreshPods), /proc/uptime latency, and cgroup audit
+if grep -q "forceFreshPods" "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2" && \
+   grep -q "/proc/uptime" "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2" && \
+   grep -q "/sys/fs/cgroup/cpu.max" "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2" && \
+   grep -q "QUERY_VEC" "${K8S_DIR}/testkube/templates/test-workflow-security.yaml.j2"; then
+    assert_test "testkube/templates/*.j2: implements Freshness Gate (forceFreshPods), /proc/uptime latency, and cgroup audit" 0
+else
+    assert_test "testkube/templates/*.j2: Freshness Gate, /proc/uptime, or cgroup audit missing" 1
+fi
+
+# Verify standalone k6 scripts support multi-sandbox round-robin (SANDBOX_IDS) for Scaled-Out mode
+if grep -q "SANDBOX_IDS" "${K8S_DIR}/testkube/tests/k6-sandbox-benchmark.js" && \
+   grep -q "SANDBOX_IDS" "${K8S_DIR}/testkube/tests/k6-sustained-load.js" && \
+   grep -q "__ITER % SANDBOX_LIST.length" "${K8S_DIR}/testkube/tests/k6-sandbox-benchmark.js"; then
+    assert_test "testkube/tests/k6-*.js: supports multi-sandbox round-robin (SANDBOX_IDS) for Scaled-Out mode" 0
+else
+    assert_test "testkube/tests/k6-*.js: multi-sandbox round-robin (SANDBOX_IDS) missing" 1
+fi
+
+# Verify Makefile supports SANDBOX_COUNT, CODE_VERSION, and FORCE_FRESH test parameters
+if grep -q "SANDBOX_COUNT" "${REPO_ROOT}/Makefile" && \
+   grep -q "CODE_VERSION" "${REPO_ROOT}/Makefile" && \
+   grep -q "FORCE_FRESH" "${REPO_ROOT}/Makefile"; then
+    assert_test "Makefile: supports SANDBOX_COUNT, CODE_VERSION, and FORCE_FRESH test parameters" 0
+else
+    assert_test "Makefile: SANDBOX_COUNT, CODE_VERSION, or FORCE_FRESH missing" 1
 fi
 
 # ==============================================================================

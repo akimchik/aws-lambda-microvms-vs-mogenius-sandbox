@@ -14,7 +14,7 @@
 #   • Read-Only Dry-Run Audit : ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run
 # ==============================================================================
 set -euo pipefail
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:${PATH:-/usr/bin:/bin}"
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:${PATH:-/usr/bin:/bin}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -147,6 +147,10 @@ host_needs_privilege() {
             fi
         done
         command -v docker >/dev/null 2>&1 || return 0
+        # If systemd is managing services on this Linux host and docker daemon is inactive, Stage 0 requires privilege to start it
+        if [ -d /run/systemd/system ] && ! docker info >/dev/null 2>&1; then
+            return 0
+        fi
         # Check if invoking user belongs to the docker group
         if command -v id >/dev/null 2>&1 && ! id -Gn 2>/dev/null | grep -qw docker; then
             return 0
@@ -173,12 +177,14 @@ prime_sudo() {
     if ! host_needs_privilege && [ "$FORCE_ASK_BECOME" != true ]; then
         return 0
     fi
-    # If already within sudo timeout, nothing to do!
+    # If already within sudo timeout (or passwordless NOPASSWD sudo), nothing to do!
     if sudo -n true 2>/dev/null; then
         return 0
     fi
-    # If Ansible will prompt for become password via --ask-become-pass (-K), avoid double-prompting in bash
-    [ "$FORCE_ASK_BECOME" = true ] && return 0
+    # If Ansible will prompt for become password via --ask-become-pass (-K or auto-detected SUDO_NEEDS_PASS), avoid double-prompting in bash
+    if [ "$FORCE_ASK_BECOME" = true ] || [ "${SUDO_NEEDS_PASS:-false}" = true ]; then
+        return 0
+    fi
     if ! sudo -n true 2>/dev/null; then
         echo -e "  ${CYAN}[>]${NC} Sudo credentials required for host toolchains. Refreshing session..."
         sudo -v || { echo -e "${RED}✗ Error: Sudo authentication failed.${NC}" >&2; exit 1; }
@@ -222,7 +228,7 @@ build_ansible_args() {
                   -e "minikube_custom_memory_mb=${CUSTOM_MEM}"
                   -e "configure_linux_sysctl=${CONFIGURE_HOST_SYSCTL}")
     if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ]; then
-        if [ "$FORCE_ASK_BECOME" = true ]; then
+        if [ "$FORCE_ASK_BECOME" = true ] || { [ "${SUDO_NEEDS_PASS:-false}" = true ] && host_needs_privilege; }; then
             ANSIBLE_ARGS+=(--ask-become-pass)
         fi
     fi
@@ -253,6 +259,7 @@ main() {
     fi
 
     ensure_ansible
+    detect_sudo_mode
     prime_sudo
     start_sudo_keepalive
     audit_and_tune_linux_inotify
@@ -278,8 +285,14 @@ main() {
         fi
     fi
 
-    # Stages 1-8: Minikube, gVisor, mogenius & Testkube Reconciliation
-    ansible-playbook "${ANSIBLE_ARGS[@]}" --skip-tags preflight
+    # Stages 1-8: Minikube, gVisor, mogenius & Testkube Reconciliation (100% user-space, zero become tasks)
+    STAGE_ARGS=(-i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml"
+                -e "force_helm_upgrade=${FORCE_HELM}"
+                -e "minikube_ci_mode=${CI_MODE}"
+                -e "minikube_custom_memory_mb=${CUSTOM_MEM}"
+                -e "configure_linux_sysctl=${CONFIGURE_HOST_SYSCTL}")
+    [ "$FORCE_ASK_BECOME" = true ] && [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ] && STAGE_ARGS+=(--ask-become-pass)
+    ansible-playbook "${STAGE_ARGS[@]}" --skip-tags preflight
     echo -e "${GREEN}Cluster is 100% CONVERGED, HEALTHY & READY!${NC}"
 }
 

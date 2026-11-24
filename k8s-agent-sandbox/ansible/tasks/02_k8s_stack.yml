@@ -57,13 +57,22 @@
         ${EXTRA_HELM_ARG} \
         -n agent-sandbox-system --create-namespace \
         -f "${K8S_DIR}/helm/values-mogenius.yaml" \
+        --set "sandboxes.profiles.default.warmPool.replicas={{ sandbox_warmpool_replicas | default(1) }}" \
+        --set "sandboxes.profiles.default.resources.requests.cpu={{ sandbox_cpu_request | default('250m') }}" \
+        --set "sandboxes.profiles.default.resources.limits.cpu={{ sandbox_cpu_limit | default('2') }}" \
+        --set "sandboxes.profiles.default.resources.requests.memory={{ sandbox_memory_request | default('512Mi') }}" \
+        --set "sandboxes.profiles.default.resources.limits.memory={{ sandbox_memory_limit | default('2Gi') }}" \
         --wait --timeout=3m
     fi
     kubectl apply -f "${K8S_DIR}/ingress/sandbox-router.yaml" \
                   -f "${K8S_DIR}/ingress/sandbox-ingress.yaml" \
                   -f "${K8S_DIR}/monitoring/agent-sandbox-servicemonitor.yaml" \
                   -f "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" >/dev/null
+    EXP_HASH=$(openssl dgst -sha256 "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" 2>/dev/null | awk '{print $NF}' || echo "v1")
+    kubectl -n agent-sandbox-system patch deployment sandbox-latency-exporter \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/config\":\"${EXP_HASH}\"}}}}}" >/dev/null 2>&1 || true
     kubectl -n agent-sandbox-system rollout status deployment/sandbox-router --timeout=180s
+    kubectl -n agent-sandbox-system rollout status deployment/sandbox-latency-exporter --timeout=180s
   args:
     executable: /bin/bash
   when: not (dry_run_mode | bool)
@@ -74,6 +83,9 @@
     set -euo pipefail
     K8S_DIR="{{ playbook_dir }}/../.."
     kubectl apply -f "${K8S_DIR}/threat-model/egress-broker.yaml" >/dev/null
+    BROKER_HASH=$(openssl dgst -sha256 "${K8S_DIR}/threat-model/egress-broker.yaml" 2>/dev/null | awk '{print $NF}' || echo "v1")
+    kubectl -n sandbox-egress-system patch deployment egress-broker \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/config\":\"${BROKER_HASH}\"}}}}}" >/dev/null 2>&1 || true
     kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=180s
   args:
     executable: /bin/bash

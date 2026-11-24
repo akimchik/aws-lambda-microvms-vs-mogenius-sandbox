@@ -52,4 +52,4 @@ sandboxes:
         mountPath: /home/coder/project
       warmPool:
         replicas: 1
-        updateStrategy: OnReplenish
+        updateStrategy: Immediate

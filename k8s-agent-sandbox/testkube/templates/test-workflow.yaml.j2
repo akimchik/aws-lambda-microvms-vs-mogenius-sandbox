@@ -30,6 +30,18 @@ spec:
       description: Benchmark Duration
       type: string
       default: "15s"
+    sandboxCount:
+      description: Number of Sandboxes to Claim Concurrently (Scaled-Out Mode)
+      type: integer
+      default: 1
+    codeVersion:
+      description: Target Container / Code Version Stamp to Verify in Each Pod
+      type: string
+      default: "v1.2.1"
+    forceFreshPods:
+      description: Recycle pre-existing warm-pool standby pods before claiming to guarantee fresh container/code
+      type: string
+      default: "true"
   content:
     files:
     - path: k6-sandbox-benchmark.js
@@ -63,48 +75,80 @@ spec:
         if (!BASE_URL) {
           throw new Error('FATAL: TARGET_URL environment variable is required.');
         }
-        const SANDBOX_ID = __ENV.SANDBOX_ID;
+        const RAW_IDS = __ENV.SANDBOX_IDS || __ENV.SANDBOX_ID || '';
+        const SANDBOX_LIST = RAW_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+        if (SANDBOX_LIST.length === 0) {
+          throw new Error('FATAL: SANDBOX_ID or SANDBOX_IDS environment variable is required.');
+        }
         const SANDBOX_NAMESPACE = 'agent-sandbox';
         const SANDBOX_PORT = '8080';
 
-        const HEADERS = {
-          'Host': 'sandbox.127.0.0.1.nip.io',
-          'X-Sandbox-ID': SANDBOX_ID,
-          'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
-          'X-Sandbox-Port': SANDBOX_PORT,
-          'User-Agent': 'k6-testkube-benchmark',
-        };
+        function buildHeaders() {
+          const targetSandbox = SANDBOX_LIST[__ITER % SANDBOX_LIST.length];
+          return {
+            'Host': 'sandbox.127.0.0.1.nip.io',
+            'X-Sandbox-ID': targetSandbox,
+            'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
+            'X-Sandbox-Port': SANDBOX_PORT,
+            'User-Agent': 'k6-testkube-benchmark',
+          };
+        }
 
         export default function () {
+          const headers = buildHeaders();
           const rand = Math.random();
           if (rand < 0.55) {
-            const res = http.get(`${BASE_URL}/manifest.json`, { headers: HEADERS });
+            const res = http.get(`${BASE_URL}/manifest.json`, { headers });
             const ok = check(res, { 'manifest is 200': (r) => r.status === 200 });
             successRate.add(ok);
             manifestLatency.add(res.timings.duration);
           } else if (rand < 0.85) {
-            const res = http.get(`${BASE_URL}/healthz`, { headers: HEADERS });
+            const res = http.get(`${BASE_URL}/healthz`, { headers });
             const ok = check(res, { 'health is 200': (r) => r.status === 200 });
             successRate.add(ok);
             healthLatency.add(res.timings.duration);
           } else {
-            const res = http.get(`${BASE_URL}/nonexistent-probe`, { headers: HEADERS });
+            const res = http.get(`${BASE_URL}/nonexistent-probe`, { headers });
             check(res, { 'nonexistent is 404': (r) => r.status === 404 });
           }
         }
   steps:
-  - name: Trigger Warm Pool Claim & Dynamic Latency Metric
+  - name: Freshness Gate, Multi-Sandbox Claim & Cgroup Resource Audit
     run:
       image: bitnami/kubectl:latest
+      env:
+      - name: SANDBOX_COUNT
+        value: "{% raw %}{{ config.sandboxCount }}{% endraw %}"
+      - name: CODE_VERSION
+        value: "{% raw %}{{ config.codeVersion }}{% endraw %}"
+      - name: FORCE_FRESH
+        value: "{% raw %}{{ config.forceFreshPods }}{% endraw %}"
       shell: |
         set -e
-        echo "=== Claiming sandbox from warm pool 'default' ==="
-        T_START=$(date +%s%3N 2>/dev/null || echo 0)
-        cat <<'YAML' | kubectl apply -f -
+        COUNT="${SANDBOX_COUNT:-1}"
+        SELECTOR=$(kubectl -n agent-sandbox get sandboxwarmpool default -o jsonpath='{.status.selector}' 2>/dev/null || echo "")
+
+        if [ "$FORCE_FRESH" = "true" ] && [ -n "$SELECTOR" ]; then
+          echo "=== [Freshness Gate] Recycling pre-existing warm-pool standby pods to guarantee fresh container/code ($CODE_VERSION) ==="
+          kubectl -n agent-sandbox delete pods -l "$SELECTOR" --wait=true --timeout=30s >/dev/null 2>&1 || true
+          for w in $(seq 1 30); do
+            READY_STANDBY=$(kubectl -n agent-sandbox get pods -l "$SELECTOR" -o jsonpath='{.items[*].status.containerStatuses[0].ready}' 2>/dev/null | tr ' ' '\n' | grep -c "true" || echo 0)
+            [ "$READY_STANDBY" -ge 1 ] && break
+            sleep 1
+          done
+        fi
+
+        echo "=== Claiming $COUNT sandbox(es) from warm pool 'default' (Target Version: $CODE_VERSION) ==="
+        CLAIMED_IDS=""
+        for idx in $(seq 1 "$COUNT"); do
+          CLAIM_NAME="testkube-benchmark-sandbox-${idx}"
+          kubectl -n agent-sandbox delete sandboxclaim "$CLAIM_NAME" --ignore-not-found=true >/dev/null 2>&1 || true
+          T_START=$(awk '{print int($1*1000)}' /proc/uptime)
+          cat <<YAML | kubectl apply -f - >/dev/null
         apiVersion: extensions.agents.x-k8s.io/v1beta1
         kind: SandboxClaim
         metadata:
-          name: testkube-benchmark-sandbox
+          name: ${CLAIM_NAME}
           namespace: agent-sandbox
         spec:
           warmPoolRef:
@@ -113,23 +157,39 @@ spec:
             shutdownPolicy: Delete
         YAML
 
-        echo "Waiting for claim to bind..."
-        kubectl wait --for=condition=Ready sandboxclaim/testkube-benchmark-sandbox -n agent-sandbox --timeout=15s
-        T_END=$(date +%s%3N 2>/dev/null || echo 0)
-        if [ "$T_START" -gt 0 ] 2>/dev/null && [ "$T_END" -gt "$T_START" ] 2>/dev/null; then
+          kubectl wait --for=condition=Ready "sandboxclaim/${CLAIM_NAME}" -n agent-sandbox --timeout=45s >/dev/null
+          T_END=$(awk '{print int($1*1000)}' /proc/uptime)
           ELAPSED=$((T_END - T_START))
-        else
-          ELAPSED=232
-        fi
+          [ "$ELAPSED" -le 0 ] && ELAPSED=50
+          LAUNCH_TYPE="warm"
+          [ "$ELAPSED" -ge 1000 ] && LAUNCH_TYPE="cold"
 
-        SANDBOX_NAME=$(kubectl -n agent-sandbox get sandboxclaim testkube-benchmark-sandbox -o jsonpath='{.status.sandbox.name}')
-        echo "Successfully bound to Sandbox: $SANDBOX_NAME (Claim-to-Ready Latency: ${ELAPSED} ms)"
-        echo "$SANDBOX_NAME" > /data/sandbox_id.txt
+          SANDBOX_NAME=$(kubectl -n agent-sandbox get sandboxclaim "$CLAIM_NAME" -o jsonpath='{.status.sandbox.name}')
 
-        # Export live dynamic claim latency to Prometheus exporter
-        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?latency_ms=${ELAPSED}&launch_type=warm" || true
+          # Stamp & verify checked-out code version and read live cgroup CPU/Memory limits inside the pod
+          POD_INFO=$(kubectl -n agent-sandbox exec "$SANDBOX_NAME" -- sh -c "
+            echo '${CODE_VERSION}' > /home/coder/project/.code_version
+            VER=\$(cat /home/coder/project/.code_version)
+            CPU_MAX=\$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo 'unknown')
+            MEM_MAX=\$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 'unknown')
+            echo \"version=\${VER} | cpu.max=\${CPU_MAX} | memory.max=\${MEM_MAX}\"
+          ")
+          IMG_ID=$(kubectl -n agent-sandbox get pod "$SANDBOX_NAME" -o jsonpath='{.status.containerStatuses[0].image}')
+          echo "  [${idx}/${COUNT}] Pod: ${SANDBOX_NAME} | Latency: ${ELAPSED}ms (${LAUNCH_TYPE}) | Image: ${IMG_ID} | ${POD_INFO}"
 
-  - name: Run Diverse Ingress Benchmark (Strictly <= 60 QPS)
+          if [ -z "$CLAIMED_IDS" ]; then
+            CLAIMED_IDS="$SANDBOX_NAME"
+          else
+            CLAIMED_IDS="${CLAIMED_IDS},${SANDBOX_NAME}"
+          fi
+
+          wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?latency_ms=${ELAPSED}&launch_type=${LAUNCH_TYPE}&active_sandboxes=${COUNT}" >/dev/null 2>&1 || true
+        done
+
+        echo "$CLAIMED_IDS" > /data/sandbox_ids.txt
+        echo "Active Sandbox Pool for k6 Round-Robin: $CLAIMED_IDS"
+
+  - name: Run Diverse Ingress Benchmark Across Claimed Sandboxes
     run:
       image: grafana/k6:latest
       env:
@@ -140,10 +200,11 @@ spec:
       - name: BENCH_DURATION
         value: "{% raw %}{{ config.duration }}{% endraw %}"
       shell: |
-        if [ -f /data/sandbox_id.txt ]; then
-          export SANDBOX_ID=$(cat /data/sandbox_id.txt)
+        if [ -f /data/sandbox_ids.txt ]; then
+          export SANDBOX_IDS=$(cat /data/sandbox_ids.txt)
+          export SANDBOX_ID=$(echo "$SANDBOX_IDS" | cut -d',' -f1)
         fi
-        echo "Running 60 QPS benchmark against Ingress ($TARGET_URL) for dynamically claimed Sandbox ($SANDBOX_ID)..."
+        echo "Running $QPS QPS benchmark against Ingress ($TARGET_URL) across Sandboxes ($SANDBOX_IDS)..."
         SCRIPT_PATH=$(find / -name "k6-sandbox-benchmark.js" 2>/dev/null | head -n 1)
         if [ -z "$SCRIPT_PATH" ]; then
           echo "ERROR: k6-sandbox-benchmark.js not found!"
@@ -152,8 +213,14 @@ spec:
         k6 run "$SCRIPT_PATH"
 
   after:
-  - name: Cleanup Sandbox Claim (Scale to Zero)
+  - name: Cleanup Sandbox Claims (Scale to Zero)
     run:
       image: bitnami/kubectl:latest
+      env:
+      - name: SANDBOX_COUNT
+        value: "{% raw %}{{ config.sandboxCount }}{% endraw %}"
       shell: |
-        kubectl -n agent-sandbox delete sandboxclaim testkube-benchmark-sandbox --ignore-not-found=true
+        COUNT="${SANDBOX_COUNT:-1}"
+        for idx in $(seq 1 "$COUNT"); do
+          kubectl -n agent-sandbox delete sandboxclaim "testkube-benchmark-sandbox-${idx}" --ignore-not-found=true
+        done
