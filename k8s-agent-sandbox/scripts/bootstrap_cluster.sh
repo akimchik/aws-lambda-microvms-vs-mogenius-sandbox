@@ -163,7 +163,7 @@ detect_sudo_mode() {
     SUDO_NEEDS_PASS=false
     local eff_uid="${MOCK_UID:-$(id -u)}"
     if [ "${HOST_PLATFORM}" == "Linux" ] && [ "$eff_uid" -ne 0 ]; then
-        if [ "$FORCE_ASK_BECOME" = true ] || ! sudo -n true 2>/dev/null; then
+        if [ "$FORCE_ASK_BECOME" = true ] || [ "${PKG_MGR:-}" == "apt" ] || ! sudo -n true 2>/dev/null; then
             SUDO_NEEDS_PASS=true
         fi
     fi

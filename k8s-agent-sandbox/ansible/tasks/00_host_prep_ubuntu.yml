@@ -1,6 +1,6 @@
 ---
 # ==============================================================================
-# FLOWS 2 & 3: Ubuntu Linux (x86_64 & aarch64) Host Toolchain Preparation
+# FLOWS 2 & 3: Ubuntu / Debian Linux (x86_64 & aarch64) Host Toolchain Preparation
 # Package Manager: apt-get
 # ==============================================================================
 

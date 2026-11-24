@@ -361,9 +361,10 @@ EOF
 ) && assert_test "detect_sudo_mode(): Detects sudo requires password on Linux non-root" 0 || \
    assert_test "detect_sudo_mode(): Detects sudo requires password on Linux non-root" 1
 
-# Test detect_sudo_mode(): Linux non-root with passwordless sudo -> SUDO_NEEDS_PASS=false
+# Test detect_sudo_mode(): Rocky/RHEL (dnf) non-root with cached/passwordless sudo -> SUDO_NEEDS_PASS=false
 (
     HOST_PLATFORM="Linux"
+    PKG_MGR="dnf"
     MOCK_UID=1000
     FORCE_ASK_BECOME=false
     MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_ok"
@@ -376,8 +377,21 @@ EOF
     PATH="${MOCK_SUDO_DIR}:${PATH}"
     detect_sudo_mode
     [ "$SUDO_NEEDS_PASS" = false ]
-) && assert_test "detect_sudo_mode(): Detects passwordless sudo on Linux non-root" 0 || \
-   assert_test "detect_sudo_mode(): Detects passwordless sudo on Linux non-root" 1
+) && assert_test "detect_sudo_mode(): Rocky/RHEL (dnf) uses cached sudo ticket (SUDO_NEEDS_PASS=false)" 0 || \
+   assert_test "detect_sudo_mode(): Rocky/RHEL (dnf) uses cached sudo ticket (SUDO_NEEDS_PASS=false)" 1
+
+# Test detect_sudo_mode(): Debian/Ubuntu (apt) non-root skips sudo ticket check -> SUDO_NEEDS_PASS=true
+(
+    HOST_PLATFORM="Linux"
+    PKG_MGR="apt"
+    MOCK_UID=1000
+    FORCE_ASK_BECOME=false
+    MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_ok"
+    PATH="${MOCK_SUDO_DIR}:${PATH}"
+    detect_sudo_mode
+    [ "$SUDO_NEEDS_PASS" = true ]
+) && assert_test "detect_sudo_mode(): Debian/Ubuntu (apt) skips sudo ticket check (SUDO_NEEDS_PASS=true)" 0 || \
+   assert_test "detect_sudo_mode(): Debian/Ubuntu (apt) skips sudo ticket check (SUDO_NEEDS_PASS=true)" 1
 
 # Test detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS
 (
