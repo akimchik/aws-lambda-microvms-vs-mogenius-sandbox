@@ -1397,6 +1397,16 @@ for task_file in "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" "${K8S_DIR}/
     fi
 done
 
+# Verify 00_host_prep.yml natively checks /usr/bin/sudo.ws via ansible.builtin.stat before switching ansible_become_exe (Ubuntu 25.10+ sudo-rs compatibility)
+stat_line=$(grep -n "ansible.builtin.stat:" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" | head -n1 | cut -d: -f1)
+exe_line=$(grep -n "ansible_become_exe: /usr/bin/sudo.ws" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" | head -n1 | cut -d: -f1)
+if [ -n "$stat_line" ] && [ -n "$exe_line" ] && [ "$stat_line" -lt "$exe_line" ] && \
+   grep -q "sudo_ws_stat.stat.exists" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: checks /usr/bin/sudo.ws via ansible.builtin.stat (line ${stat_line}) before switching ansible_become_exe (line ${exe_line})" 0
+else
+    assert_test "tasks/00_host_prep.yml: checks /usr/bin/sudo.ws via ansible.builtin.stat before switching ansible_become_exe" 1
+fi
+
 # ==============================================================================
 # Summary Report
 # ==============================================================================
