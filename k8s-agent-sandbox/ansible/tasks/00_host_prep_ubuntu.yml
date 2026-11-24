@@ -288,6 +288,7 @@
 - name: "[0/8 Ubuntu] Evaluate target user and docker group membership facts"
   ansible.builtin.set_fact:
     target_docker_user_ubuntu: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
+    docker_group_exists_ubuntu: "{{ 'docker' in (ansible_facts['getent_group'] | default({})) }}"
     user_in_docker_group_ubuntu: >-
       {{
         ('docker' in (ansible_facts['getent_group'] | default({}))) and
@@ -305,7 +306,7 @@
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - not (dry_run_mode | bool)
-    - not (user_in_docker_group_ubuntu | bool)
+    - not (docker_group_exists_ubuntu | bool)
   tags: [preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Add invoking user to docker group (secure group membership)"

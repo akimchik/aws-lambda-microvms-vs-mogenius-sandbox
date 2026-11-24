@@ -265,8 +265,19 @@ main() {
     audit_and_tune_linux_inotify
     build_ansible_args
 
-    # Stage 0: Host OS, Kernel Sysctl & Toolchain Preparation
-    ansible-playbook "${ANSIBLE_ARGS[@]}" --tags preflight -e "preflight_only_mode=true"
+    # Stage 0: Host OS, Kernel Sysctl & Toolchain Preparation (up to 3 attempts if SUDO password has a typo)
+    local attempt=1
+    if [[ " ${ANSIBLE_ARGS[*]} " == *" --ask-become-pass "* ]]; then
+        echo -e "  ${CYAN}[>]${NC} Please, enter SUDO password for full privileged access (attempt 1/3):"
+    fi
+    while ! ansible-playbook "${ANSIBLE_ARGS[@]}" --tags preflight -e "preflight_only_mode=true"; do
+        if [[ " ${ANSIBLE_ARGS[*]} " == *" --ask-become-pass "* ]] && [ "$attempt" -lt 3 ]; then
+            attempt=$((attempt + 1))
+            echo -e "  ${YELLOW}[!]${NC} Authentication failed. Please, enter SUDO password for full privileged access (attempt ${attempt}/3):"
+        else
+            exit 1
+        fi
+    done
 
     if [ "$PREFLIGHT_ONLY" = true ]; then
         echo -e "${GREEN}Preflight & Toolchain Discovery Successful (--preflight-only)!${NC}"
