@@ -48,13 +48,17 @@ echo -e "${BLUE}============================================================${NC
 echo -e "${BLUE}Multi-OS & Multi-Architecture Bootstrap Integration Test Suite${NC}"
 echo -e "${BLUE}============================================================${NC}"
 
-# Source the bootstrap script functions (ensuring source guard works)
+# Source the bootstrap script functions (saving and restoring SCRIPT_DIR / K8S_DIR so BASH_SOURCE inside bootstrap_cluster.sh stays isolated)
 if [ ! -f "$BOOTSTRAP_SCRIPT" ]; then
     echo -e "${RED}✗ Error: Bootstrap script not found at ${BOOTSTRAP_SCRIPT}${NC}"
     exit 1
 fi
+_SAVED_SCRIPT_DIR="$SCRIPT_DIR"
+_SAVED_K8S_DIR="$K8S_DIR"
 # shellcheck source=k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 source "$BOOTSTRAP_SCRIPT"
+SCRIPT_DIR="$_SAVED_SCRIPT_DIR"
+K8S_DIR="$_SAVED_K8S_DIR"
 
 MOCK_TMP_DIR=$(mktemp -d)
 cleanup_test_env() {
@@ -517,6 +521,7 @@ fi
 echo -e "\n${YELLOW}[3/6] Testing Real Ansible Sizing Expression & Single-Pass Pipeline...${NC}"
 
 # Resolve Python interpreter used by ansible-playbook (portable across macOS, Debian, Ubuntu, and Rocky Linux)
+export K8S_DIR
 RUNTIME_TEST_PY=""
 ANSIBLE_PY=$(head -n1 "$(command -v ansible-playbook 2>/dev/null || echo /nonexistent)" 2>/dev/null | sed 's/^#!//' | awk '{print $1}' || true)
 for candidate_py in "$ANSIBLE_PY" "$PY_BIN" $(which python3 python 2>/dev/null); do
@@ -528,22 +533,23 @@ done
 
 # Real Runtime Execution Test: Execute actual Ansible Jinja2 sizing formula with RUNTIME_TEST_PY
 if [ -n "$RUNTIME_TEST_PY" ]; then
-    "$RUNTIME_TEST_PY" -c "
-import yaml, jinja2
+    "$RUNTIME_TEST_PY" -c '
+import yaml, jinja2, os
+k8s_dir = os.environ["K8S_DIR"]
 env = jinja2.Environment()
-env.filters['bool'] = lambda v: str(v).lower() in ('true', '1', 'yes') if isinstance(v, str) else bool(v)
-tasks = yaml.safe_load(open('${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml'))
-sizing_task = [t for t in tasks if 'Determine final Minikube primary node CPUs and Memory' in t.get('name', '')][0]
-cpu_tpl = env.from_string(sizing_task['ansible.builtin.set_fact']['effective_cpus'])
-mem_tpl = env.from_string(sizing_task['ansible.builtin.set_fact']['effective_memory_mb'])
+env.filters["bool"] = lambda v: str(v).lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)
+tasks = yaml.safe_load(open(os.path.join(k8s_dir, "ansible/tasks/01_minikube_gvisor.yml")))
+sizing_task = [t for t in tasks if "Determine final Minikube primary node CPUs and Memory" in t.get("name", "")][0]
+cpu_tpl = env.from_string(sizing_task["ansible.builtin.set_fact"]["effective_cpus"])
+mem_tpl = env.from_string(sizing_task["ansible.builtin.set_fact"]["effective_memory_mb"])
 
 assert int(cpu_tpl.render(minikube_ci_mode=False, minikube_cpus=4).strip()) == 4
-assert int(mem_tpl.render(minikube_custom_memory_mb='', minikube_ci_mode=False, detected_mem_mb=8424, minikube_memory_mb=8192).strip()) == 8192
-assert int(mem_tpl.render(minikube_custom_memory_mb='', minikube_ci_mode=False, detected_mem_mb=7957, minikube_memory_mb=8192).strip()) == 6144
+assert int(mem_tpl.render(minikube_custom_memory_mb="", minikube_ci_mode=False, detected_mem_mb=8424, minikube_memory_mb=8192).strip()) == 8192
+assert int(mem_tpl.render(minikube_custom_memory_mb="", minikube_ci_mode=False, detected_mem_mb=7957, minikube_memory_mb=8192).strip()) == 6144
 assert int(cpu_tpl.render(minikube_ci_mode=True, minikube_cpus=4).strip()) == 2
-assert int(mem_tpl.render(minikube_custom_memory_mb='', minikube_ci_mode=True, detected_mem_mb=16000, minikube_memory_mb=8192).strip()) == 4096
-assert int(mem_tpl.render(minikube_custom_memory_mb='7168', minikube_ci_mode=False, detected_mem_mb=16000, minikube_memory_mb=8192).strip()) == 7168
-" >/dev/null 2>&1 && \
+assert int(mem_tpl.render(minikube_custom_memory_mb="", minikube_ci_mode=True, detected_mem_mb=16000, minikube_memory_mb=8192).strip()) == 4096
+assert int(mem_tpl.render(minikube_custom_memory_mb="7168", minikube_ci_mode=False, detected_mem_mb=16000, minikube_memory_mb=8192).strip()) == 7168
+' >/dev/null 2>&1 && \
     assert_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): Executes real Ansible sizing formula (8192 default, 6144 clamp, 4096 CI, custom override)" 0 || \
     assert_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): Executes real Ansible sizing formula (8192 default, 6144 clamp, 4096 CI, custom override)" 1
 else
@@ -605,13 +611,15 @@ STANZA_COUNT_2=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_2}.out" || tru
 
 # Verify zero unreachable/dead tasks across all 00_host_prep*.yml files (every task must carry 'preflight' tag)
 if [ -n "$RUNTIME_TEST_PY" ]; then
-    if "$RUNTIME_TEST_PY" -c "
-import yaml, glob
-for f in sorted(glob.glob('${K8S_DIR}/ansible/tasks/00_host_prep*.yml')):
+    if "$RUNTIME_TEST_PY" -c '
+import yaml, glob, os
+k8s_dir = os.environ["K8S_DIR"]
+for f in sorted(glob.glob(os.path.join(k8s_dir, "ansible/tasks/00_host_prep*.yml"))):
     for t in yaml.safe_load(open(f)):
-        tags = t.get('tags', [])
-        assert 'preflight' in tags, f'Missing preflight tag in {f}: {t.get(\"name\")}'
-" >/dev/null 2>&1; then
+        tags = t.get("tags", [])
+        tname = t.get("name", "")
+        assert "preflight" in tags, f"Missing preflight tag in {f}: {tname}"
+' >/dev/null 2>&1; then
         assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 0
     else
         assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 1
@@ -640,127 +648,115 @@ else
     assert_test "tasks/00_host_prep_*.yml & 01_minikube_gvisor.yml: Active docker group access enforcement missing" 1
 fi
 
-# Real Runtime Execution Test: Extract broker.py from egress-broker.yaml and run live HTTP tests with threat_probe.py (Blocked 403 vs Drift EXTRA_ALLOWED_HOSTS 200)
+# Real Runtime Execution Test: Extract broker.py from egress-broker.yaml and run in-process WSGI/handler test with threat_probe.py (Blocked 403 vs Drift EXTRA_ALLOWED_HOSTS 200)
 if [ -n "$RUNTIME_TEST_PY" ]; then
-    "$RUNTIME_TEST_PY" -c "
-import yaml, tempfile, subprocess, time, urllib.request, sys, os
-sys.path.insert(0, '${K8S_DIR}/threat-model')
+    "$RUNTIME_TEST_PY" -c '
+import yaml, threading, urllib.request, socket, sys, os
+socket.getfqdn = lambda *a: "localhost"
+k8s_dir = os.environ["K8S_DIR"]
+sys.path.insert(0, os.path.join(k8s_dir, "threat-model"))
 import threat_probe
 
-docs = list(yaml.safe_load_all(open('${K8S_DIR}/threat-model/egress-broker.yaml')))
-cm = [d for d in docs if d and d.get('kind') == 'ConfigMap' and d['metadata']['name'] == 'egress-broker-code'][0]
-broker_code = cm['data']['broker.py']
+docs = list(yaml.safe_load_all(open(os.path.join(k8s_dir, "threat-model/egress-broker.yaml"))))
+cm = [d for d in docs if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "egress-broker-code"][0]
+broker_code = cm["data"]["broker.py"]
 
-def run_broker_test(port, extra_hosts=''):
-    code = broker_code.replace('port = 8080', f'port = {port}')
-    with tempfile.NamedTemporaryFile('w', suffix='.py', delete=False) as f:
-        f.write(code)
-        script_path = f.name
-    env = os.environ.copy()
-    env['GITHUB_APP_INSTALLATION_TOKEN'] = 'ghs_test_ephemeral_token'
-    if extra_hosts:
-        env['EXTRA_ALLOWED_HOSTS'] = extra_hosts
-    proc = subprocess.Popen([sys.executable, script_path], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def run_broker_test(extra_hosts=""):
+    os.environ["GITHUB_APP_INSTALLATION_TOKEN"] = "ghs_test_ephemeral_token"
+    os.environ["EXTRA_ALLOWED_HOSTS"] = extra_hosts
+    ns = {"__name__": "broker_test"}
+    exec(broker_code, ns)
+    srv = ns["HTTPServer"](("127.0.0.1", 0), ns["BrokerHandler"])
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
     try:
-        for _ in range(30):
-            try:
-                urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=0.5)
-                break
-            except Exception:
-                time.sleep(0.1)
-        res = threat_probe.check_broker_egress(f'http://127.0.0.1:{port}')
-        t6b = [r for r in res if r['id'] == 'T6B_BROKER_POLICY_ENFORCEMENT'][0]
-        t6c = [r for r in res if r['id'] == 'T6C_OUT_OF_SANDBOX_AUTH'][0]
-        return t6b['status'], t6c['status']
+        res = threat_probe.check_broker_egress(f"http://127.0.0.1:{port}")
+        t6b = [r for r in res if r["id"] == "T6B_BROKER_POLICY_ENFORCEMENT"][0]
+        t6c = [r for r in res if r["id"] == "T6C_OUT_OF_SANDBOX_AUTH"][0]
+        return t6b["status"], t6c["status"]
     finally:
-        proc.terminate()
-        proc.wait()
-        os.unlink(script_path)
+        srv.shutdown()
+        srv.server_close()
 
-# 1. Default hardened broker: example.com MUST be PASS (BLOCKED_BY_BROKER) with HTTP 403
-s_t6b, s_t6c = run_broker_test(18081, '')
-assert s_t6b == 'PASS (BLOCKED_BY_BROKER)', f'Expected PASS (BLOCKED_BY_BROKER), got {s_t6b}'
-assert s_t6c == 'PASS (BROKER_INJECTED)', f'Expected PASS (BROKER_INJECTED), got {s_t6c}'
+s_t6b, s_t6c = run_broker_test("")
+assert s_t6b == "PASS (BLOCKED_BY_BROKER)", f"Expected PASS (BLOCKED_BY_BROKER), got {s_t6b}"
+assert s_t6c == "PASS (BROKER_INJECTED)", f"Expected PASS (BROKER_INJECTED), got {s_t6c}"
 
-# 2. Drift simulation (EXTRA_ALLOWED_HOSTS=example.com): example.com MUST flip to FAIL (EXPOSED)
-d_t6b, _ = run_broker_test(18082, 'example.com')
-assert d_t6b == 'FAIL (EXPOSED)', f'Expected FAIL (EXPOSED) on drift, got {d_t6b}'
-" >/dev/null 2>&1 && \
+d_t6b, _ = run_broker_test("example.com")
+assert d_t6b == "FAIL (EXPOSED)", f"Expected FAIL (EXPOSED) on drift, got {d_t6b}"
+' >/dev/null 2>&1 && \
     assert_test "Live E2E Runtime (egress-broker + threat_probe.py): Verifies HTTP 403 block (PASS) and EXTRA_ALLOWED_HOSTS drift detection (FAIL EXPOSED)" 0 || \
     assert_test "Live E2E Runtime (egress-broker + threat_probe.py): Verifies HTTP 403 block (PASS) and EXTRA_ALLOWED_HOSTS drift detection (FAIL EXPOSED)" 1
 fi
 
 # Real Runtime Execution Test: Extract exporter.py from sandbox-latency-exporter.yaml and verify POST /record & GET /metrics for T6B drift (1 -> 0 -> 1)
 if [ -n "$RUNTIME_TEST_PY" ]; then
-    "$RUNTIME_TEST_PY" -c "
-import yaml, tempfile, subprocess, time, urllib.request, sys, os
+    "$RUNTIME_TEST_PY" -c '
+import yaml, threading, urllib.request, socket, sys, os
+socket.getfqdn = lambda *a: "localhost"
+k8s_dir = os.environ["K8S_DIR"]
 
-docs = list(yaml.safe_load_all(open('${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml')))
-cm = [d for d in docs if d and d.get('kind') == 'ConfigMap' and d['metadata']['name'] == 'sandbox-latency-exporter-code'][0]
-exp_code = cm['data']['exporter.py'].replace('port = 8080', 'port = 18083')
+docs = list(yaml.safe_load_all(open(os.path.join(k8s_dir, "monitoring/sandbox-latency-exporter.yaml"))))
+cm = [d for d in docs if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "sandbox-latency-exporter-code"][0]
+exp_code = cm["data"]["exporter.py"]
 
-with tempfile.NamedTemporaryFile('w', suffix='.py', delete=False) as f:
-    f.write(exp_code)
-    script_path = f.name
-
-proc = subprocess.Popen([sys.executable, script_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+ns = {"__name__": "exporter_test"}
+exec(exp_code, ns)
+srv = ns["HTTPServer"](("127.0.0.1", 0), ns["ExporterHandler"])
+port = srv.server_address[1]
+t = threading.Thread(target=srv.serve_forever, daemon=True)
+t.start()
 try:
-    for _ in range(30):
-        try:
-            urllib.request.urlopen('http://127.0.0.1:18083/healthz', timeout=0.5)
-            break
-        except Exception:
-            time.sleep(0.1)
-    # Record drift: T6B=0, security_passed=5, cold launch latency
-    req = urllib.request.Request('http://127.0.0.1:18083/record?security_passed=5&T6B_BROKER_POLICY_ENFORCEMENT=0&latency_ms=1450&launch_type=cold&active_sandboxes=3', data=b'', method='POST')
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/record?security_passed=5&T6B_BROKER_POLICY_ENFORCEMENT=0&latency_ms=1450&launch_type=cold&active_sandboxes=3", data=b"", method="POST")
     urllib.request.urlopen(req, timeout=2)
-    metrics = urllib.request.urlopen('http://127.0.0.1:18083/metrics', timeout=2).read().decode()
-    assert 'agent_sandbox_security_vector_status{vector=\"T6B_BROKER_POLICY_ENFORCEMENT\"} 0' in metrics, 'T6B=0 missing in /metrics'
-    assert 'agent_sandbox_security_checks_passed 5' in metrics, 'security_checks_passed 5 missing'
-    assert 'agent_sandbox_active_test_sandboxes 3' in metrics, 'active_sandboxes 3 missing'
-    assert 'agent_sandbox_claim_controller_startup_latency_ms_count{launch_type=\"cold\"} 1' in metrics, 'cold count 1 missing'
+    metrics = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2).read().decode()
+    assert "agent_sandbox_security_vector_status{vector=\"T6B_BROKER_POLICY_ENFORCEMENT\"} 0" in metrics, "T6B=0 missing in /metrics"
+    assert "agent_sandbox_security_checks_passed 5" in metrics, "security_checks_passed 5 missing"
+    assert "agent_sandbox_active_test_sandboxes 3" in metrics, "active_sandboxes 3 missing"
+    assert "agent_sandbox_claim_controller_startup_latency_ms_count{launch_type=\"cold\"} 1" in metrics, "cold count 1 missing"
 finally:
-    proc.terminate()
-    proc.wait()
-    os.unlink(script_path)
-" >/dev/null 2>&1 && \
+    srv.shutdown()
+    srv.server_close()
+' >/dev/null 2>&1 && \
     assert_test "Live E2E Runtime (sandbox-latency-exporter): Verifies POST /record & GET /metrics for T6B=0 drift, cold latency, and active_sandboxes=3" 0 || \
     assert_test "Live E2E Runtime (sandbox-latency-exporter): Verifies POST /record & GET /metrics for T6B=0 drift, cold latency, and active_sandboxes=3" 1
 fi
 
 # Real POSIX /bin/sh Execution Test: Execute rendered TestWorkflow shell steps under /bin/sh -e (catches sh: 0: bad number)
 if [ -n "$RUNTIME_TEST_PY" ]; then
-    "$RUNTIME_TEST_PY" -c "
+    "$RUNTIME_TEST_PY" -c '
 import jinja2, yaml, subprocess, tempfile, os
+k8s_dir = os.environ["K8S_DIR"]
 
 mock_bin = tempfile.mkdtemp()
-kubectl_path = os.path.join(mock_bin, 'kubectl')
-with open(kubectl_path, 'w') as f:
-    f.write('#!/bin/sh\nif echo \"\$*\" | grep -q \"sandboxwarmpool\"; then echo \"app=sandbox\"; elif echo \"\$*\" | grep -q \"sandbox.name\"; then echo \"default-pod-1\"; elif echo \"\$*\" | grep -q \"image\"; then echo \"sandbox:1.2.1\"; elif echo \"\$*\" | grep -q \"exec\"; then echo \"version=v2.1.0 | cpu.max=200000 100000 | memory.max=2147483648\"; fi\nexit 0\n')
+kubectl_path = os.path.join(mock_bin, "kubectl")
+with open(kubectl_path, "w") as f:
+    f.write("#!/bin/sh\nif echo \"$*\" | grep -q \"sandboxwarmpool\"; then echo \"app=sandbox\"; elif echo \"$*\" | grep -q \"sandbox.name\"; then echo \"default-pod-1\"; elif echo \"$*\" | grep -q \"image\"; then echo \"sandbox:1.2.1\"; elif echo \"$*\" | grep -q \"exec\"; then echo \"version=v2.1.0 | cpu.max=200000 100000 | memory.max=2147483648\"; fi\nexit 0\n")
 os.chmod(kubectl_path, 0o755)
-wget_path = os.path.join(mock_bin, 'wget')
-with open(wget_path, 'w') as f:
-    f.write('#!/bin/sh\nexit 0\n')
+wget_path = os.path.join(mock_bin, "wget")
+with open(wget_path, "w") as f:
+    f.write("#!/bin/sh\nexit 0\n")
 os.chmod(wget_path, 0o755)
 
-env = jinja2.Environment(loader=jinja2.FileSystemLoader('${K8S_DIR}/testkube/templates'))
-doc = yaml.safe_load(env.get_template('test-workflow.yaml.j2').render(minikube_ip='127.0.0.1'))
-shell_script = doc['spec']['steps'][0]['run']['shell']
+env = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.join(k8s_dir, "testkube/templates")))
+doc = yaml.safe_load(env.get_template("test-workflow.yaml.j2").render(minikube_ip="127.0.0.1"))
+shell_script = doc["spec"]["steps"][0]["run"]["shell"]
 data_dir = tempfile.mkdtemp()
-shell_script = shell_script.replace('/data/sandbox_ids.txt', os.path.join(data_dir, 'sandbox_ids.txt'))
-shell_script = shell_script.replace('/proc/uptime', os.devnull)
+shell_script = shell_script.replace("/data/sandbox_ids.txt", os.path.join(data_dir, "sandbox_ids.txt"))
+shell_script = shell_script.replace("/proc/uptime", os.devnull)
 
 run_env = os.environ.copy()
-run_env['PATH'] = f'{mock_bin}:' + run_env.get('PATH', '')
-run_env['SANDBOX_COUNT'] = '2'
-run_env['CODE_VERSION'] = 'v2.1.0-fresh'
-run_env['FORCE_FRESH'] = 'true'
+run_env["PATH"] = f"{mock_bin}:" + run_env.get("PATH", "")
+run_env["SANDBOX_COUNT"] = "2"
+run_env["CODE_VERSION"] = "v2.1.0-fresh"
+run_env["FORCE_FRESH"] = "true"
 
-res = subprocess.run(['/bin/sh', '-e', '-c', shell_script], env=run_env, capture_output=True, text=True)
-assert res.returncode == 0, f'POSIX /bin/sh failed: {res.stderr}'
-assert 'bad number' not in res.stderr, f'bad number error in stderr: {res.stderr}'
-assert 'default-pod-1,default-pod-1' in open(os.path.join(data_dir, 'sandbox_ids.txt')).read()
-" >/dev/null 2>&1 && \
+res = subprocess.run(["/bin/sh", "-e", "-c", shell_script], env=run_env, capture_output=True, text=True)
+assert res.returncode == 0, f"POSIX /bin/sh failed: {res.stderr}"
+assert "bad number" not in res.stderr, f"bad number error in stderr: {res.stderr}"
+assert "default-pod-1,default-pod-1" in open(os.path.join(data_dir, "sandbox_ids.txt")).read()
+' >/dev/null 2>&1 && \
     assert_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): Executes under /bin/sh -e with zero 'bad number' errors" 0 || \
     assert_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): Executes under /bin/sh -e with zero 'bad number' errors" 1
 fi
