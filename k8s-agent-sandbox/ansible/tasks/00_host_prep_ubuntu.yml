@@ -356,15 +356,49 @@
   ansible.builtin.shell: |
     export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     if ! command -v docker >/dev/null 2>&1; then
-      echo "ERROR: Docker runtime is required by Minikube (--driver=docker) but 'docker' was not found in PATH."
-      echo "Please install Docker on this host: 'sudo apt-get install -y docker.io containerd'."
+      cat >&2 <<'EOF'
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] Docker Engine Not Found After Apt Provisioning
+    --------------------------------------------------------------------------------
+    Why Ansible stopped:
+      Minikube (--driver=docker) requires the 'docker' binary in PATH, but automated
+      apt installation did not make '/usr/bin/docker' available (e.g., missing apt
+      repository or running without sudo privileges).
+
+    How to resolve:
+      1. Install Docker Engine via apt:
+         sudo apt-get update && sudo apt-get install -y docker.io containerd
+      2. Re-run cluster reconciliation:
+         make cluster
+    ================================================================================
+    EOF
       exit 1
     fi
     if docker info >/dev/null 2>&1; then
       echo "Docker daemon is active and accessible by current session user '$(whoami)'."
     else
-      echo "ERROR: Current user '$(whoami)' cannot operate as an active member of the 'docker' group (/var/run/docker.sock access denied or daemon inactive)."
-      echo "If Stage 0 just added '$(whoami)' to /etc/group, activate the group in your shell via 'newgrp docker' (or log out and back in) and re-run 'make cluster'."
+      cat >&2 <<EOF
+    ================================================================================
+    [STAGE 0 PREFLIGHT ACTION REQUIRED] Activate 'docker' Group or Daemon Session
+    --------------------------------------------------------------------------------
+    What Ansible already configured for you:
+      ✓ Ensured 'docker' group exists in /etc/group
+      ✓ Added user '$(whoami)' to the 'docker' group (/etc/group: $(getent group docker 2>/dev/null || echo 'configured'))
+      ✓ Enabled and started 'docker.service' via systemd
+
+    Why Ansible cannot continue in this shell process:
+      Linux kernels assign supplementary group IDs (GIDs) at login time. Because
+      '$(whoami)' was added to the 'docker' group during this run (or 'docker.service'
+      is blocked in a container/non-systemd environment), your current shell process
+      still holds its old group credentials and cannot open /var/run/docker.sock.
+
+    How to resolve (run this one-liner to reload your group session and resume):
+      newgrp docker <<'EOC'
+      make cluster
+    EOC
+      (Or simply run 'newgrp docker' first, then run 'make cluster'.)
+    ================================================================================
+    EOF
       exit 1
     fi
   args:

@@ -16,7 +16,7 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run the Ansible bootstrapper:
 
 ```bash
-# 0. Fast verification suite (134 unit, YAML & Jinja2 template rendering tests, zero VM spin-up)
+# 0. Fast verification suite (143 unit, live HTTP runtime, POSIX /bin/sh & Jinja2 tests, zero VM spin-up)
 make check
 
 # 1. Non-mutating read-only audit (runs ansible-playbook --check --diff, 0 changes made)
@@ -70,74 +70,154 @@ testkube get twe
 
 ## 🎬 Live Demo Choreography: Drift Detection, Container Freshness, Scale-Up & Scale-Out
 
-Use this 4-act sequence during live presentations to demonstrate container/code freshness guarantees, security drift detection & self-healing, vertical scaling (**Scaled-Up**), and horizontal warm-pool scaling (**Scaled-Out**):
+Use this 5-part self-contained sequence to demonstrate every testing approach, container freshness guarantee, live security drift detection & self-healing, vertical scaling (**Scaled-Up**), and horizontal warm-pool scaling (**Scaled-Out**). Every scenario below includes the **exact execution command**, **exact terminal verification command**, and **expected output**—no extra planning or manual calculation required.
 
-### Act 1: Fresh Container / Code Rollout Proof (`FORCE_FRESH=true`)
-Every test run enforces a **Freshness Gate** (`forceFreshPods=true` by default on `test-benchmark` and `test-security`), which evicts pre-existing warm-pool standby pods, waits for fresh standby pods, stamps `CODE_VERSION` into `/home/coder/project/.code_version`, and audits live Linux cgroup v2 limits (`/sys/fs/cgroup/cpu.max` and `/sys/fs/cgroup/memory.max`):
+### Pre-Demo: Verify Local Integration Suite & Open Live Terminal/Grafana Watchers
+Before running cluster scenarios, you can prove that the entire multi-OS bootstrap, live `egress-broker` + `threat_probe.py` policy engine, `sandbox-latency-exporter` metrics server, and `/bin/sh -e` TestWorkflow scripts pass 143/143 checks in ~15 seconds without touching a VM:
 
 ```bash
-make test-benchmark CODE_VERSION=v2.1.0-fresh FORCE_FRESH=true QPS=60 DURATION=15s
+# 1. Execute the 143-test Multi-OS, Multi-Arch & Live Component Runtime Suite
+make check
+
+# 2. (Optional) Open a second terminal to watch warm-pool standby & claimed pods in real time
+kubectl -n agent-sandbox get pods,sandboxclaims -w
 ```
-
-### Act 2: Simulating Live Security Drift & Self-Healing
-1. **Inject Security Drift** (temporarily whitelist `example.com` in `egress-broker` via `EXTRA_ALLOWED_HOSTS`):
-   ```bash
-   kubectl -n sandbox-egress-system set env deployment/egress-broker EXTRA_ALLOWED_HOSTS="example.com"
-   kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=60s
-   ```
-2. **Detect Drift in Testkube & Grafana:**
-   ```bash
-   make test-security DURATION=15s QPS=10
-   ```
-   *Result:* `T6B_BROKER_POLICY_ENFORCEMENT` fails (`FAIL (EXPOSED)`), Testkube records `T6B_BROKER_POLICY_ENFORCEMENT=0` and `security_passed=5` in `sandbox-latency-exporter` and exits with failure, and the `T6B` vector panel in Grafana immediately turns **RED (`FAIL (EXPOSED)`)**.
-3. **Self-Heal with Ansible Reconciler (or remove `EXTRA_ALLOWED_HOSTS`):**
-   ```bash
-   make cluster
-   make test-security DURATION=15s QPS=10
-   ```
-   *Result:* Ansible restores `egress-broker.yaml` (removing `EXTRA_ALLOWED_HOSTS`), rolls the broker pod, and `make test-security` restores Grafana to **GREEN (`6/6`)**.
-
-### Act 3: Scaled-Up Mode (Vertical CPU & Memory Scaling)
-1. **Constrained Sandbox (`250m` CPU / `512Mi` RAM):**
-   ```bash
-   helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
-     -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
-     --set sandboxes.profiles.default.resources.limits.cpu=250m \
-     --set sandboxes.profiles.default.resources.limits.memory=512Mi
-   make test-benchmark CODE_VERSION=v1-constrained FORCE_FRESH=true QPS=60
-   ```
-   *Observe in Testkube logs:* `cpu.max=25000 100000` (0.25 vCPU ceiling) and elevated p95 latency under 60 QPS.
-2. **Scaled-Up Sandbox (`2` vCPUs / `2Gi` RAM):**
-   ```bash
-   helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
-     -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
-     --set sandboxes.profiles.default.resources.limits.cpu=2 \
-     --set sandboxes.profiles.default.resources.limits.memory=2Gi
-   make test-benchmark CODE_VERSION=v2-scaled-up FORCE_FRESH=true QPS=60
-   ```
-   *Observe in Testkube logs:* `cpu.max=200000 100000` (2.0 vCPU ceiling) and p95 latency `< 15ms`.
-
-### Act 4: Scaled-Out Mode (Horizontal Warm-Pool Scaling & Multi-Sandbox Fan-Out)
-1. **Under-Provisioned Warm Pool (`replicas=1`) vs. 3 Concurrent Claims (`SANDBOX_COUNT=3`):**
-   ```bash
-   make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-pool-1 QPS=90
-   ```
-   *Observe in Testkube logs & Grafana:* Claim `[1/3]` binds in `~220ms (warm)`, while Claims `[2/3]` and `[3/3]` experience `>2,500ms (cold)` startup drift because the warm pool only had 1 standby pod!
-2. **Scaled-Out Warm Pool (`replicas=3`) with 3 Concurrent Claims & Multi-Sandbox Round-Robin Load (`DURATION=60s` so all 3 active pods remain visible throughout the test):**
-   ```bash
-   helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
-     -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
-     --set sandboxes.profiles.default.warmPool.replicas=3
-   kubectl -n agent-sandbox wait --for=condition=Ready pod --all --timeout=90s
-   make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-scaled-out-3 FORCE_FRESH=false QPS=90 DURATION=60s
-   make test-load SANDBOX_COUNT=3 DURATION=2m QPS=100
-   ```
-   *Observe in Testkube logs & Grafana:* All 3 claims bind in `<350ms (warm)`, all 3 claimed pods remain visible for the full 60s run before the `after:` scale-to-zero cleanup step deletes the claims, and `k6` distributes 90–100 RPS round-robin across all 3 isolated gVisor sandboxes via `X-Sandbox-ID`.
 
 * **Dedicated Testkube & Security Grafana Dashboard:**
   * `http://grafana.127.0.0.1.nip.io/d/testkube-agent-benchmarks/testkube-agent-sandbox-benchmark-dashboard`
 * **Sandbox HTTP Responses & Latency Comparison Dashboard:**
   * `http://grafana.127.0.0.1.nip.io/d/sandbox-http-responses/sandbox-ingress-and-http-responses-comparison-dashboard`
+
+---
+
+### Act 1: Fresh Container / Code Rollout Proof (`FORCE_FRESH=true`)
+Every benchmark and security run supports a **Freshness Gate** (`FORCE_FRESH=true`, enabled by default on `test-benchmark` and `test-security`). It evicts pre-existing warm-pool standby pods, waits for the controller (`warmPool.updateStrategy: Immediate`) to provision fresh standby pods, stamps `CODE_VERSION` into `/home/coder/project/.code_version`, measures true pod birth age via `/proc/uptime` (`warm` `<350ms` vs `cold`), and audits in-guest Linux cgroup v2 limits (`/sys/fs/cgroup/cpu.max` and `/sys/fs/cgroup/memory.max`):
+
+```bash
+# 1. Run the 60 QPS benchmark with explicit fresh pod recycling and version stamp
+make test-benchmark CODE_VERSION=v2.1.0-fresh FORCE_FRESH=true QPS=60 DURATION=15s
+
+# 2. Verify the recorded freshness, launch_type, and cgroup audit directly from the exporter
+kubectl -n agent-sandbox exec deploy/sandbox-latency-exporter -- \
+  wget -qO- http://127.0.0.1:9102/metrics | grep -E "agent_sandbox_(claim_controller_startup_latency_ms_count|active_test_sandboxes)"
+```
+* **What to observe in the terminal output:**
+  * `[Freshness Gate] Deleting pre-existing standby pods (app=sandbox)...`
+  * `[Sandbox 1/1] Claimed pod: default-... (Latency: ~220-350ms, Launch: warm)`
+  * `[Audit] default-... -> version=v2.1.0-fresh | cpu.max=100000 100000 | memory.max=1073741824`
+
+---
+
+### Act 2: Simulating Live Security Drift & Self-Healing (`T6B` Vector `1 -> 0 -> 1`)
+Demonstrate that the platform detects real-time L7 egress policy drift—not static or mocked statuses—and self-heals via Ansible:
+
+```bash
+# 1. Baseline Check: Verify all 6/6 threat vectors (T1-T6C) are currently PASS (1)
+make test-security DURATION=15s QPS=10
+kubectl -n agent-sandbox exec deploy/sandbox-latency-exporter -- \
+  wget -qO- http://127.0.0.1:9102/metrics | grep 'agent_sandbox_security_'
+
+# 2. Inject Live Security Drift: Whitelist an unauthorized external host (example.com) on egress-broker
+kubectl -n sandbox-egress-system set env deployment/egress-broker EXTRA_ALLOWED_HOSTS="example.com"
+kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=60s
+
+# 3. Trigger Red-Team Security Audit to catch the drift
+make test-security DURATION=15s QPS=10 || true
+
+# 4. Verify in terminal (and on Grafana) that T6B flipped to 0 (FAIL EXPOSED) and passed count dropped to 5/6
+kubectl -n agent-sandbox exec deploy/sandbox-latency-exporter -- \
+  wget -qO- http://127.0.0.1:9102/metrics | grep -E 'agent_sandbox_security_(checks_passed|vector_status\{vector="T6B_BROKER_POLICY_ENFORCEMENT"\})'
+```
+* **Expected output after Step 4:**
+  ```text
+  agent_sandbox_security_checks_passed 5
+  agent_sandbox_security_vector_status{vector="T6B_BROKER_POLICY_ENFORCEMENT"} 0
+  ```
+  *(On the Grafana Testkube & Security Dashboard, the `T6B_BROKER_POLICY_ENFORCEMENT` panel immediately turns **RED `FAIL (EXPOSED)`** and the workflow exits non-zero).*
+
+```bash
+# 5. Self-Heal Drift: Re-run Ansible cluster reconciliation (or unset EXTRA_ALLOWED_HOSTS) and re-verify
+make cluster
+make test-security DURATION=15s QPS=10
+kubectl -n agent-sandbox exec deploy/sandbox-latency-exporter -- \
+  wget -qO- http://127.0.0.1:9102/metrics | grep -E 'agent_sandbox_security_(checks_passed|vector_status\{vector="T6B_BROKER_POLICY_ENFORCEMENT"\})'
+```
+* **Expected output after Step 5:**
+  ```text
+  agent_sandbox_security_checks_passed 6
+  agent_sandbox_security_vector_status{vector="T6B_BROKER_POLICY_ENFORCEMENT"} 1
+  ```
+  *(Grafana returns to **GREEN `6/6 PASS (SECURED)`**).*
+
+---
+
+### Act 3: Scaled-Up Mode (Vertical CPU & Memory Scaling Verified Inside gVisor)
+Prove how vertical resource limits propagate into the gVisor sandbox cgroup hierarchy and affect 60 QPS tail latency:
+
+```bash
+# 1. Constrained Profile (250m CPU / 512Mi RAM)
+helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+  -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+  --set sandboxes.profiles.default.resources.limits.cpu=250m \
+  --set sandboxes.profiles.default.resources.limits.memory=512Mi
+
+make test-benchmark CODE_VERSION=v1-constrained FORCE_FRESH=true QPS=60 DURATION=15s
+```
+* **Expected terminal audit output:** `version=v1-constrained | cpu.max=25000 100000 | memory.max=536870912` (`0.25 vCPU` quota / `512 MiB` ceiling) with higher p95 response times under 60 QPS load.
+
+```bash
+# 2. Scaled-Up Profile (2 vCPUs / 2Gi RAM)
+helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+  -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+  --set sandboxes.profiles.default.resources.limits.cpu=2 \
+  --set sandboxes.profiles.default.resources.limits.memory=2Gi
+
+make test-benchmark CODE_VERSION=v2-scaled-up FORCE_FRESH=true QPS=60 DURATION=15s
+```
+* **Expected terminal audit output:** `version=v2-scaled-up | cpu.max=200000 100000 | memory.max=2147483648` (`2.0 vCPU` quota / `2 GiB` ceiling) and p95 latency `< 15ms`.
+
+---
+
+### Act 4: Scaled-Out Mode (Horizontal Warm-Pool Exhaustion vs. Multi-Sandbox Round-Robin Load)
+Prove the difference between an under-provisioned warm pool (`replicas=1`, where concurrent agent claims trigger cold starts) and a horizontally scaled warm pool (`replicas=3`, where all 3 claims bind sub-second from standby and `k6` distributes load round-robin across all 3 sandboxes):
+
+```bash
+# 1. Under-Provisioned Warm Pool (replicas=1) vs. 3 Concurrent Sandbox Claims (SANDBOX_COUNT=3)
+helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+  -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+  --set sandboxes.profiles.default.warmPool.replicas=1
+kubectl -n agent-sandbox wait --for=condition=Ready pod --all --timeout=90s
+
+make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-pool-1 FORCE_FRESH=false QPS=90 DURATION=20s
+```
+* **What to observe in Testkube logs & Grafana:**
+  * `[Sandbox 1/3]` binds in `~220ms (Launch: warm)` (consumes the sole standby pod).
+  * `[Sandbox 2/3]` and `[Sandbox 3/3]` experience `>2,000ms (Launch: cold)` startup latency because the warm pool was exhausted and had to cold-boot 2 new gVisor pods on demand.
+
+```bash
+# 2. Scaled-Out Warm Pool (replicas=3) with 3 Concurrent Claims & 90-100 RPS Multi-Sandbox Round-Robin Load
+helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+  -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
+  --set sandboxes.profiles.default.warmPool.replicas=3
+kubectl -n agent-sandbox wait --for=condition=Ready pod --all --timeout=90s
+
+# Verify 3 warm standby pods are Ready before claiming
+kubectl -n agent-sandbox get pods -l app=sandbox
+
+# Run 60s multi-sandbox benchmark (all 3 active sandboxes remain visible in 'kubectl get pods' and Grafana for 60s)
+make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-scaled-out-3 FORCE_FRESH=false QPS=90 DURATION=60s
+
+# Or run a 2-minute sustained 100 RPS load test distributed round-robin across 3 sandboxes
+make test-load SANDBOX_COUNT=3 DURATION=2m QPS=100
+
+# (Optional Cleanup) Restore default 1-replica warm pool after the demo
+helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
+  -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml
+```
+* **What to observe in Testkube logs & Grafana:**
+  * All 3 claims (`[Sandbox 1/3]`, `[Sandbox 2/3]`, `[Sandbox 3/3]`) bind in `<350ms (Launch: warm)`.
+  * `agent_sandbox_active_test_sandboxes` reports `3` in Grafana.
+  * `k6` distributes requests round-robin across all 3 sandbox IDs via the `X-Sandbox-ID` header (`[k6] Target URL: ... | Pool Size: 3 sandbox(es) | IDs: default-...,default-...,default-...`).
 
 ---
 

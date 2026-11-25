@@ -12,9 +12,10 @@
     that:
       - docker_mem_raw.rc is defined and docker_mem_raw.rc == 0
     fail_msg: >-
-      Current user '{{ ansible_facts['user_id'] }}' cannot access the Docker daemon socket (/var/run/docker.sock).
-      Ensure Docker is running and '{{ ansible_facts['user_id'] }}' is an active member of the 'docker' group
-      in this shell session (run 'newgrp docker' or log out and back in).
+      [STAGE 1 BLOCKED] Current user '{{ ansible_facts['user_id'] }}' cannot access the Docker daemon socket (/var/run/docker.sock).
+      On Linux, if Stage 0 just added '{{ ansible_facts['user_id'] }}' to /etc/group ('docker'), your current shell session still holds
+      its pre-login group list: run 'newgrp docker' (or log out and back in) and re-run 'make cluster'.
+      On macOS, ensure Docker Desktop / OrbStack / Colima is running ('open -a Docker') and re-run 'make cluster'.
   when: not (dry_run_mode | bool)
   tags: [minikube, sizing]
 

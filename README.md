@@ -166,9 +166,9 @@ To eliminate typing long nested script paths or memorizing CLI flags, the root [
 | **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |
 | **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods | ❌ No |
 | **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows | ❌ No |
-| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) | ❌ No |
-| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) | ❌ No |
-| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) | ❌ No |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20 FORCE_FRESH=true`) | ❌ No |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold/warm benchmark (`DURATION=30s QPS=60 SANDBOX_COUNT=1 CODE_VERSION=v1.2.1 FORCE_FRESH=true`) | ❌ No |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS multi-sandbox load test (`DURATION=2m QPS=100 SANDBOX_COUNT=3`) | ❌ No |
 
 > [!NOTE]
 > **Privilege Escalation & Sudo Model:**
@@ -260,14 +260,14 @@ done
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
 1. **Audit or Provision the Full 2-Node Cluster via `make` (Ansible Reconciler):**
-   - **Fast Verification Suite:** Run `make check` to execute all 134 unit, syntax, and Jinja2 template rendering tests (~15s, zero VM spin-up).
+   - **Fast Verification Suite:** Run `make check` to execute all 143 unit, syntax, live HTTP runtime (`egress-broker` + `threat_probe.py` & `sandbox-latency-exporter`), POSIX `/bin/sh -e`, and Jinja2 template rendering tests (~15s, zero VM spin-up).
    - **Read-Only Dry Run (Zero Changes):** Run `make dry-run` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run`) to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
    - **Host Toolchain Discovery:** Run `make preflight` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only`) to ensure required host binaries are present and exit before cluster changes.
    - **Full Cluster Reconciliation:** Run `make cluster` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`), which delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml`, dynamically captures `minikube ip`, renders the Testkube workflow templates, and verifies all 11 service endpoints.
-2. **Run Continuous Red-Team Security & Benchmark Workflows via `make`:**
-   - `make test-security` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing)*
-   - `make test-benchmark` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark with scale-to-zero)*
-   - `make test-load` *(or `make test-load DURATION=2m QPS=70` — sustained load targeting active sandbox without pod restarts)*
+2. **Run Continuous Red-Team Security, Freshness Gate, Scaled-Up & Scaled-Out Workflows via `make`:**
+   - `make test-security` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing; supports live drift verification via `EXTRA_ALLOWED_HOSTS` on `egress-broker`)*
+   - `make test-benchmark` *(Freshness Gate `FORCE_FRESH=true`, cgroup v2 `cpu.max`/`memory.max` & `CODE_VERSION` audit, `/proc/uptime` warm vs. cold claim latency, and multi-sandbox fan-out via `SANDBOX_COUNT=3`)*
+   - `make test-load` *(e.g. `make test-load DURATION=2m QPS=100 SANDBOX_COUNT=3` — sustained round-robin load across N claimed sandboxes without pod restarts)*
 3. **Execute Interactive Demo Modules 1–4:** (`SandboxWarmPool`, Ephemeral CI/CD, Multi-Tenant PVC Isolation, `operatingMode: Suspended`, and `kubectl debug`).
 4. **Inspect Live Telemetry & Security Posture in Grafana:** (`http://grafana.127.0.0.1.nip.io`, login `admin` / `admin`).
 

@@ -46,13 +46,41 @@
 - name: "[0/8 macOS] Verify Docker container runtime is available on host"
   ansible.builtin.shell: |
     if ! command -v docker >/dev/null 2>&1; then
-      echo "ERROR: Docker is required for Minikube (--driver=docker) but was not found in PATH."
-      echo "Please install Docker Desktop (e.g. 'brew install --cask docker') or start your container engine."
+      cat >&2 <<'EOF'
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] Missing Container Runtime on macOS (docker)
+    --------------------------------------------------------------------------------
+    Why Ansible stopped:
+      Minikube (--driver=docker) requires a macOS container engine (Docker Desktop,
+      OrbStack, or Colima), which requires macOS GUI / system-extension approval
+      and was not found in PATH.
+
+    How to resolve (choose one, then re-run 'make cluster'):
+      • Option A (Docker Desktop): brew install --cask docker && open -a Docker
+      • Option B (OrbStack):       brew install --cask orbstack && open -a OrbStack
+      • Option C (Colima CLI):     brew install docker colima && colima start --cpu 4 --memory 10
+    ================================================================================
+    EOF
       exit 1
     fi
     if ! docker info >/dev/null 2>&1; then
-      echo "ERROR: Docker Desktop is installed but the daemon is not running."
-      echo "Please start Docker Desktop ('open -a Docker') before reconciling the cluster."
+      cat >&2 <<'EOF'
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] macOS Docker Daemon Is Not Running
+    --------------------------------------------------------------------------------
+    Why Ansible stopped:
+      The 'docker' CLI is installed, but the container engine daemon is not
+      accepting connections on the Docker socket.
+
+    How to resolve:
+      1. Start your container engine:
+         • Docker Desktop: open -a Docker
+         • OrbStack:       open -a OrbStack
+         • Colima:         colima start --cpu 4 --memory 10
+      2. Wait until 'docker info' succeeds, then re-run:
+         make cluster
+    ================================================================================
+    EOF
       exit 1
     fi
   environment:
