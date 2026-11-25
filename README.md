@@ -25,7 +25,7 @@ This repository contains the end-to-end reference architectures, deployment mani
 ```text
 .
 ├── .github/workflows/
-│   └── bootstrap-matrix-test.yaml       # Multi-OS (macOS, Ubuntu, Rocky Linux) & Multi-Arch (x86_64, aarch64) CI matrix
+│   └── bootstrap-matrix-test.yaml       # 7-job Multi-OS (macOS, Ubuntu, Debian 13, Rocky Linux 9) & Multi-Arch (x86_64, aarch64) CI matrix
 ├── aws-lambda-microvms/                 # Original AWS Lambda MicroVMs (Firecracker) Workshop
 │   ├── module-1/                        # Basic MicroVM execution & Port-9000 lifecycle hooks
 │   ├── module-2/                        # Event-driven Pull Request code reviewer
@@ -160,7 +160,7 @@ To eliminate typing long nested script paths or memorizing CLI flags, the root [
 
 | Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile | Privilege (`sudo` / `BECOME`) Required |
 | :--- | :--- | :--- | :--- | :--- |
-| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, platform & arch matrix | ❌ No |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 143 unit, live HTTP runtime, POSIX `/bin/sh` & Jinja2 tests | ❌ No |
 | **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit | ❌ No |
 | **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
 | **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |

@@ -82,7 +82,7 @@ However, their underlying architectural abstractions and operational models dive
     sandboxTemplateRef:
       name: ci-runner-template
     updateStrategy:
-      type: OnReplenish
+      type: Immediate
   ---
   apiVersion: extensions.agents.x-k8s.io/v1beta1
   kind: SandboxClaim
