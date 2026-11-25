@@ -1106,7 +1106,7 @@ if command -v ruby >/dev/null 2>&1; then
     bad = false
     Dir.glob("'"${K8S_DIR}"'/ansible/tasks/*.yml").sort.each do |f|
       c = File.read(f)
-      if c =~ /=\(\)\s*.*?\"?\$\{\w+\[@\]\}\"?/m
+      if c =~ /(\w+)=\(\)/ && c.include?("\${#{$1}[@]}")
         bad = true
       end
     end
