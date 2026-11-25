@@ -1101,18 +1101,10 @@ else
 fi
 
 # Regression Test: tasks/*.yml contains zero empty array expansions (${arr[@]} on arr=()) under set -u (macOS bash 3.2 bug)
-if command -v ruby >/dev/null 2>&1; then
-    EMPTY_ARR_STATUS=$(ruby -e '
-    bad = false
-    Dir.glob("'"${K8S_DIR}"'/ansible/tasks/*.yml").sort.each do |f|
-      c = File.read(f)
-      if c =~ /(\w+)=\(\)/ && c.include?("\${#{$1}[@]}")
-        bad = true
-      end
-    end
-    exit(bad ? 1 : 0)
-    ' 2>/dev/null && echo "0" || echo "1")
-    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" "$EMPTY_ARR_STATUS"
+if ! grep -Eq '\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}' "${K8S_DIR}"/ansible/tasks/*.yml; then
+    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" 0
+else
+    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" 1
 fi
 
 # Regression Test: task [6/8] mogenius helm upgrade executes cleanly in /bin/bash set -euo pipefail (both latest & pinned version)
