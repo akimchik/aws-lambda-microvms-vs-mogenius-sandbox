@@ -80,25 +80,22 @@ make test-benchmark CODE_VERSION=v2.1.0-fresh FORCE_FRESH=true QPS=60 DURATION=1
 ```
 
 ### Act 2: Simulating Live Security Drift & Self-Healing
-1. **Inject Security Drift** (temporarily whitelist `example.com` in `egress-broker` and restart the broker process):
+1. **Inject Security Drift** (temporarily whitelist `example.com` in `egress-broker` via `EXTRA_ALLOWED_HOSTS`):
    ```bash
-   kubectl -n sandbox-egress-system get configmap egress-broker-code -o yaml | \
-     sed 's/"raw.githubusercontent.com"/"raw.githubusercontent.com", "example.com"/' | \
-     kubectl apply -f -
-   kubectl -n sandbox-egress-system rollout restart deployment/egress-broker
-   kubectl -n sandbox-egress-system rollout status deployment/egress-broker
+   kubectl -n sandbox-egress-system set env deployment/egress-broker EXTRA_ALLOWED_HOSTS="example.com"
+   kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=60s
    ```
 2. **Detect Drift in Testkube & Grafana:**
    ```bash
-   make test-security
+   make test-security DURATION=15s QPS=10
    ```
-   *Result:* `T6B_BROKER_POLICY_ENFORCEMENT` fails (`FAIL (EXPOSED)`), Testkube exits with failure, and the `T6B` vector panel in Grafana immediately turns **RED (`0`)**.
-3. **Self-Heal with Ansible Reconciler:**
+   *Result:* `T6B_BROKER_POLICY_ENFORCEMENT` fails (`FAIL (EXPOSED)`), Testkube records `T6B_BROKER_POLICY_ENFORCEMENT=0` and `security_passed=5` in `sandbox-latency-exporter` and exits with failure, and the `T6B` vector panel in Grafana immediately turns **RED (`FAIL (EXPOSED)`)**.
+3. **Self-Heal with Ansible Reconciler (or remove `EXTRA_ALLOWED_HOSTS`):**
    ```bash
    make cluster
-   make test-security
+   make test-security DURATION=15s QPS=10
    ```
-   *Result:* Ansible restores `egress-broker.yaml`, updates the SHA256 ConfigMap checksum annotation to roll the broker pod, and `make test-security` restores Grafana to **GREEN (`6/6`)**.
+   *Result:* Ansible restores `egress-broker.yaml` (removing `EXTRA_ALLOWED_HOSTS`), rolls the broker pod, and `make test-security` restores Grafana to **GREEN (`6/6`)**.
 
 ### Act 3: Scaled-Up Mode (Vertical CPU & Memory Scaling)
 1. **Constrained Sandbox (`250m` CPU / `512Mi` RAM):**
@@ -126,16 +123,16 @@ make test-benchmark CODE_VERSION=v2.1.0-fresh FORCE_FRESH=true QPS=60 DURATION=1
    make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-pool-1 QPS=90
    ```
    *Observe in Testkube logs & Grafana:* Claim `[1/3]` binds in `~220ms (warm)`, while Claims `[2/3]` and `[3/3]` experience `>2,500ms (cold)` startup drift because the warm pool only had 1 standby pod!
-2. **Scaled-Out Warm Pool (`replicas=3`) with 3 Concurrent Claims & Multi-Sandbox Round-Robin Load:**
+2. **Scaled-Out Warm Pool (`replicas=3`) with 3 Concurrent Claims & Multi-Sandbox Round-Robin Load (`DURATION=60s` so all 3 active pods remain visible throughout the test):**
    ```bash
    helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
      -n agent-sandbox-system -f k8s-agent-sandbox/helm/values-mogenius.yaml \
      --set sandboxes.profiles.default.warmPool.replicas=3
    kubectl -n agent-sandbox wait --for=condition=Ready pod --all --timeout=90s
-   make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-scaled-out-3 FORCE_FRESH=false QPS=90
+   make test-benchmark SANDBOX_COUNT=3 CODE_VERSION=v2-scaled-out-3 FORCE_FRESH=false QPS=90 DURATION=60s
    make test-load SANDBOX_COUNT=3 DURATION=2m QPS=100
    ```
-   *Observe in Testkube logs & Grafana:* All 3 claims bind in `<350ms (warm)`, and `k6` distributes 90–100 RPS round-robin across all 3 isolated gVisor sandboxes via `X-Sandbox-ID`.
+   *Observe in Testkube logs & Grafana:* All 3 claims bind in `<350ms (warm)`, all 3 claimed pods remain visible for the full 60s run before the `after:` scale-to-zero cleanup step deletes the claims, and `k6` distributes 90–100 RPS round-robin across all 3 isolated gVisor sandboxes via `X-Sandbox-ID`.
 
 * **Dedicated Testkube & Security Grafana Dashboard:**
   * `http://grafana.127.0.0.1.nip.io/d/testkube-agent-benchmarks/testkube-agent-sandbox-benchmark-dashboard`

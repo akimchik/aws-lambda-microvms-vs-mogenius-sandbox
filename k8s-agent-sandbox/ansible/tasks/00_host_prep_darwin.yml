@@ -63,4 +63,4 @@
   when:
     - not (dry_run_mode | bool)
     - not (preflight_only_mode | default(false) | bool)
-  tags: [host-prep]
+  tags: [preflight, host-prep]

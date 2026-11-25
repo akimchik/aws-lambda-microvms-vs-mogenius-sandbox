@@ -218,7 +218,7 @@
     fi
     echo "OK: [{{ item.ns }}] {{ item.svc }} -> ($IPS)"
     {% endfor %}
-    kubectl wait --for=condition=Ready node/minikube node/{{ minikube_worker_node }} --timeout=60s >/dev/null
+    kubectl wait --for=condition=Ready node --all --timeout=60s >/dev/null
   args:
     executable: /bin/bash
   register: endpoint_verification

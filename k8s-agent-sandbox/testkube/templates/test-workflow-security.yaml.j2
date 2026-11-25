@@ -117,7 +117,10 @@ spec:
                 with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                     results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "FAIL (EXPOSED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker allowed unauthorized domain: HTTP {resp.status}"})
             except urllib.error.HTTPError as e:
-                results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "PASS (BLOCKED_BY_BROKER)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker rejected unwhitelisted FQDN with HTTP {e.code}"})
+                if e.code == 403:
+                    results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "PASS (BLOCKED_BY_BROKER)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker rejected unwhitelisted FQDN with HTTP {e.code}"})
+                else:
+                    results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "FAIL (EXPOSED)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker did not reject with HTTP 403 (returned HTTP {e.code})"})
             except Exception as e:
                 results.append({"id": "T6B_BROKER_POLICY_ENFORCEMENT", "name": "Broker L7 Domain Filtering", "target": c2_url, "status": "FAIL (ERROR)", "latency_ms": round((time.time() - start) * 1000, 2), "detail": f"Broker unreachable: {type(e).__name__}"})
 
@@ -160,11 +163,7 @@ spec:
         if [ "$FORCE_FRESH" = "true" ] && [ -n "$SELECTOR" ]; then
           echo "=== [Freshness Gate] Recycling warm-pool standby pods to guarantee fresh container/code ($CODE_VERSION) ==="
           kubectl -n agent-sandbox delete pods -l "$SELECTOR" --wait=true --timeout=30s >/dev/null 2>&1 || true
-          for w in $(seq 1 30); do
-            READY_STANDBY=$(kubectl -n agent-sandbox get pods -l "$SELECTOR" -o jsonpath='{.items[*].status.containerStatuses[0].ready}' 2>/dev/null | tr ' ' '\n' | grep -c "true" || echo 0)
-            [ "$READY_STANDBY" -ge 1 ] && break
-            sleep 1
-          done
+          kubectl -n agent-sandbox wait --for=condition=Ready pod -l "$SELECTOR" --timeout=60s >/dev/null 2>&1 || true
         fi
 
         echo "=== Claiming untrusted gVisor sandbox from warm pool 'default' ==="

@@ -7,6 +7,17 @@
   check_mode: false
   tags: [always, minikube, sizing]
 
+- name: "[1/8] Assert current user can operate as an active member of the docker group"
+  ansible.builtin.assert:
+    that:
+      - docker_mem_raw.rc is defined and docker_mem_raw.rc == 0
+    fail_msg: >-
+      Current user '{{ ansible_facts['user_id'] }}' cannot access the Docker daemon socket (/var/run/docker.sock).
+      Ensure Docker is running and '{{ ansible_facts['user_id'] }}' is an active member of the 'docker' group
+      in this shell session (run 'newgrp docker' or log out and back in).
+  when: not (dry_run_mode | bool)
+  tags: [minikube, sizing]
+
 - name: "[1/8] Compute effective memory ceiling and auto-clamp if < 8192 MB"
   ansible.builtin.set_fact:
     detected_mem_mb: >-
