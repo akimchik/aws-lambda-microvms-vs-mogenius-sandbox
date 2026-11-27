@@ -32,7 +32,7 @@
   ansible.builtin.assert:
     that:
       - ansible_facts['kernel'] is defined
-      - (ansible_facts['kernel'] | regex_search('^[0-9]+\\.[0-9]+')) is version(k8s_min_linux_kernel_cgroupv2 | default('5.2'), '>=')
+      - ((ansible_facts['kernel'] | default('0.0', true) | string).split('-')[0].split('.')[0:2] | join('.')) is version(k8s_min_linux_kernel_cgroupv2 | default('5.2'), '>=')
     fail_msg: >-
       [STAGE 0 ASSERT FAILED] Linux kernel {{ ansible_facts['kernel'] | default('unknown') }} is older than
       {{ k8s_min_linux_kernel_cgroupv2 | default('5.2') }} required for cgroup v2 freezer and runc/runsc parity.

@@ -182,7 +182,7 @@
       Ensure DHCP/systemd-resolved populates upstream DNS before starting CoreDNS to prevent Loop CrashLoopBackOff.
   when:
     - ansible_facts.get('services', {}).get('systemd-resolved.service', {}).get('state', '') == 'running'
-    - not (resolved_upstream_stat.stat.exists | default(false)) or ((resolved_upstream_ns.stdout | default('') | regex_replace('nameserver\\s+127\\.0\\.0\\.\\d+', '') | trim) | length) == 0
+    - not (resolved_upstream_stat.stat.exists | default(false)) or ((resolved_upstream_ns.stdout_lines | default([]) | reject('match', '^nameserver[[:space:]]+127[.]0[.]0[.]') | list | length) == 0)
   tags: [always, preflight, host-prep]
 
 - name: "[Sync Gate 1B] Flush network daemon handlers immediately"
@@ -208,7 +208,7 @@
     msg: >-
       Netfilter audit: nft='{{ (netfilter_tool_audit.results[0].stdout | default('not installed')) | trim }}' |
       iptables='{{ (netfilter_tool_audit.results[1].stdout | default('not installed')) | trim }}' |
-      kernel_nftables_ready={{ (ansible_facts['kernel'] | regex_search('^[0-9]+\\.[0-9]+')) is version(k8s_min_linux_kernel_nftables | default('5.13'), '>=') }}
+      kernel_nftables_ready={{ ((ansible_facts['kernel'] | default('0.0', true) | string).split('-')[0].split('.')[0:2] | join('.')) is version(k8s_min_linux_kernel_nftables | default('5.13'), '>=') }}
   tags: [always, preflight, host-prep]
 
 - name: "[0/8 Linux Net] Disable firewalld when k8s_firewall_mode == 'disable'"
