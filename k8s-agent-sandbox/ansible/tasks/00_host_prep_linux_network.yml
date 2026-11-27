@@ -231,7 +231,25 @@
     permanent: true
     immediate: true
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  failed_when: false
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
+  notify: Restart Docker daemon
+  when:
+    - k8s_firewall_mode == 'configure'
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('firewalld.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Trust Docker, Minikube & Kubernetes CIDRs in firewalld trusted zone (permanent & immediate)"
+  ansible.posix.firewalld:
+    zone: trusted
+    source: "{{ item }}"
+    state: enabled
+    permanent: true
+    immediate: true
+  loop: "{{ k8s_trusted_container_cidrs | default(['172.17.0.0/16', '172.18.0.0/16', '192.168.49.0/24', '10.244.0.0/16', '10.96.0.0/12']) }}"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
+  notify: Restart Docker daemon
   when:
     - k8s_firewall_mode == 'configure'
     - not (dry_run_mode | bool)
@@ -250,7 +268,7 @@
     - 8443/tcp
     - 30000-32767/tcp
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  failed_when: false
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
   when:
     - k8s_firewall_mode == 'configure'
     - not (dry_run_mode | bool)
@@ -262,7 +280,7 @@
     direction: routed
     policy: allow
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  failed_when: false
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
   when:
     - k8s_firewall_mode == 'configure'
     - not (dry_run_mode | bool)
@@ -278,7 +296,7 @@
     - "6443"
     - "10250"
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  failed_when: false
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
   when:
     - k8s_firewall_mode == 'configure'
     - not (dry_run_mode | bool)

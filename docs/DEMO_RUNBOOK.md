@@ -16,7 +16,7 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run the Ansible bootstrapper:
 
 ```bash
-# 0. Fast verification suite (153 unit, live HTTP/containerd runtime, POSIX /bin/sh & Ansible security tests, zero VM spin-up)
+# 0. Fast verification suite (155 unit, live HTTP/containerd runtime, POSIX /bin/sh & Ansible security tests, zero VM spin-up)
 make check
 
 # 1. Non-mutating read-only audit (runs ansible-playbook --check --diff, 0 changes made)
@@ -73,10 +73,10 @@ testkube get twe
 Use this 5-part self-contained sequence to demonstrate every testing approach, container freshness guarantee, live security drift detection & self-healing, vertical scaling (**Scaled-Up**), and horizontal warm-pool scaling (**Scaled-Out**). Every scenario below includes the **exact execution command**, **exact terminal verification command**, and **expected output**—no extra planning or manual calculation required.
 
 ### Pre-Demo: Verify Local Integration Suite & Open Live Terminal/Grafana Watchers
-Before running cluster scenarios, you can prove that the entire multi-OS bootstrap, live `egress-broker` + `threat_probe.py` policy engine, `sandbox-latency-exporter` metrics server, version-aware `containerd` `1.x`/`2.x` drop-in reconciler, Ansible structural/security scan, and `/bin/sh -e` TestWorkflow scripts pass 153/153 checks in ~15 seconds without touching a VM:
+Before running cluster scenarios, you can prove that the entire multi-OS bootstrap, live `egress-broker` + `threat_probe.py` policy engine, `sandbox-latency-exporter` metrics server, version-aware `containerd` `1.x`/`2.x` drop-in reconciler, Ansible structural/security scan, and `/bin/sh -e` TestWorkflow scripts pass 155/155 checks in ~15 seconds without touching a VM:
 
 ```bash
-# 1. Execute the 153-test Multi-OS, Multi-Arch & Live Component Runtime Suite
+# 1. Execute the 155-test Multi-OS, Multi-Arch & Live Component Runtime Suite
 make check
 
 # 2. (Optional) Open a second terminal to watch warm-pool standby & claimed pods in real time

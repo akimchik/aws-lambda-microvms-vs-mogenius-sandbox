@@ -35,7 +35,16 @@ k8s_min_cpus: 2
 k8s_min_linux_kernel_cgroupv2: "5.2"
 k8s_min_linux_kernel_nftables: "5.13"
 k8s_rp_filter_mode: "2"
-k8s_firewall_mode: "audit"       # audit | configure | disable
+k8s_firewall_mode: "configure"   # audit | configure | disable
+k8s_trusted_container_cidrs:
+  - "172.17.0.0/16"
+  - "172.18.0.0/16"
+  - "192.168.49.0/24"
+  - "10.244.0.0/16"
+  - "10.96.0.0/12"
+k8s_node_dns_fallback_servers:
+  - "8.8.8.8"
+  - "1.1.1.1"
 k8s_disable_swap: false          # false = safe default on dev workstations; true = disable swap + zram
 k8s_selinux_state: "permissive"  # permissive | enforcing (RedHat-family only)
 k8s_configure_network_daemons: "{{ configure_linux_sysctl | bool }}"

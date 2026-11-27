@@ -161,7 +161,7 @@ To eliminate typing long nested script paths or memorizing CLI flags, the root [
 
 | Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile | Privilege (`sudo` / `BECOME`) Required |
 | :--- | :--- | :--- | :--- | :--- |
-| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 153 unit, live HTTP/containerd runtime, POSIX `/bin/sh` & security tests | ❌ No |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 155 unit, live HTTP/containerd runtime, POSIX `/bin/sh` & security tests | ❌ No |
 | **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit | ❌ No |
 | **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
 | **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |
@@ -261,7 +261,7 @@ done
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
 1. **Audit or Provision the Full 2-Node Cluster via `make` (Ansible Reconciler):**
-   - **Fast Verification Suite:** Run `make check` to execute all 153 unit, syntax, live HTTP/containerd runtime (`egress-broker` + `threat_probe.py`, `sandbox-latency-exporter`, and containerd 1.x/2.x drop-in), POSIX `/bin/sh -e`, Ansible security/structural scan, and Jinja2 template rendering tests (~15s, zero VM spin-up).
+   - **Fast Verification Suite:** Run `make check` to execute all 155 unit, syntax, live HTTP/containerd runtime (`egress-broker` + `threat_probe.py`, `sandbox-latency-exporter`, and containerd 1.x/2.x drop-in), POSIX `/bin/sh -e`, Ansible security/structural scan, and Jinja2 template rendering tests (~15s, zero VM spin-up).
    - **Read-Only Dry Run (Zero Changes):** Run `make dry-run` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run`) to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
    - **Host Toolchain Discovery:** Run `make preflight` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only`) to ensure required host binaries are present and exit before cluster changes.
    - **Full Cluster Reconciliation:** Run `make cluster` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`), which delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml`, dynamically captures `minikube ip`, renders the Testkube workflow templates, and verifies all 11 service endpoints.
