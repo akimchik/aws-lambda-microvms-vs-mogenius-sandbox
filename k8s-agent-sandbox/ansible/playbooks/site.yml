@@ -35,6 +35,16 @@
       become: "{{ ansible_facts['user_id'] != 'root' }}"
       failed_when: false
 
+    - name: Restart Docker daemon
+      listen: Restart Docker daemon
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: restarted
+      become: "{{ ansible_facts['user_id'] != 'root' }}"
+      ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
+      when: ansible_facts['service_mgr'] == 'systemd'
+
   tasks:
     - name: "[Stage 0] Host OS, Kernel Sysctl & Toolchain Preparation"
       ansible.builtin.import_tasks: ../tasks/00_host_prep.yml
