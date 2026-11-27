@@ -368,10 +368,12 @@ fi
 ) && assert_test "parse_args(): --dry-run sets DRY_RUN=true without PREFLIGHT_ONLY" 0 || \
    assert_test "parse_args(): --dry-run sets DRY_RUN=true without PREFLIGHT_ONLY" 1
 
-if "${K8S_DIR}/scripts/bootstrap_cluster.sh" --dry-run 2>&1 | grep -q "Dry-Run Audit Complete (--dry-run: Zero changes made)!"; then
+DRY_RUN_OUT=$("${K8S_DIR}/scripts/bootstrap_cluster.sh" --dry-run 2>&1 || true)
+if echo "$DRY_RUN_OUT" | grep -q "Dry-Run Audit Complete (--dry-run: Zero changes made)!"; then
     assert_test "bootstrap_cluster.sh --dry-run: Executes read-only audit with zero mutations" 0
 else
     assert_test "bootstrap_cluster.sh --dry-run: Executes read-only audit with zero mutations" 1
+    echo "$DRY_RUN_OUT" | tail -n 15 | sed 's/^/      /'
 fi
 
 (
@@ -1798,6 +1800,9 @@ for f in sorted(glob.glob(os.path.join(k8s_dir, "ansible/tasks/*.yml"))):
         if any(k in t for k in ("ansible.builtin.shell", "ansible.builtin.command", "shell", "command")):
             args = str(t.get("args", ""))
             assert "changed_when" in t or "creates" in args, f"shell/command missing changed_when in {f}: {tname}"
+        tags = t.get("tags") or []
+        if t.get("become") and ("preflight" in tags or "always" in tags):
+            assert "dry_run_mode" in str(t.get("when", "")), f"become task missing dry_run_mode guard in {f}: {tname}"
 ' >/dev/null 2>&1; then
         assert_test "ansible/: Passes ansible-playbook-creator structural, non-wildcard hosts, become_method, changed_when & security scan" 0
     else
@@ -1818,6 +1823,10 @@ elif command -v ruby >/dev/null 2>&1; then
         raise "missing name" unless t["name"]
         if ["ansible.builtin.shell", "ansible.builtin.command", "shell", "command"].any? { |k| t.key?(k) }
           raise "missing changed_when" unless t.key?("changed_when") || t.dig("args", "creates")
+        end
+        tags = t["tags"] || []
+        if t["become"] && (tags.include?("preflight") || tags.include?("always"))
+          raise "missing dry_run_mode" unless t["when"].to_s.include?("dry_run_mode")
         end
       end
     end

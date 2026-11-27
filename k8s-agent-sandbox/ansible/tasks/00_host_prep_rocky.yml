@@ -435,6 +435,7 @@
   check_mode: false
   when:
     - (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+    - not (dry_run_mode | bool)
     - docker_daemon_json_stat_rocky.stat.exists | default(false)
   tags: [always, preflight, host-prep]
 
