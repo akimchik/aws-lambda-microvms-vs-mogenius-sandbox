@@ -579,21 +579,22 @@ fi
 # ==============================================================================
 echo -e "\n${YELLOW}[4/6] Testing Real Ansible Embedded Task Logic & Live Component Servers...${NC}"
 
-# Execute the actual awk TOML deduplication script extracted directly from tasks/01_minikube_gvisor.yml
-TOML_AWK_SCRIPT=$(awk '/awk '\''/{flag=1; next} /'\'' "\$CONFIG_PATH"/{flag=0} flag' "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml")
-TEST_TOML_1="${MOCK_TMP_DIR}/test1.toml"
-cat << 'EOF' > "$TEST_TOML_1"
-[plugins."io.containerd.grpc.v1.cri"]
-  sandbox_image = "registry.k8s.io/pause:3.9"
-EOF
-awk "$TOML_AWK_SCRIPT" "$TEST_TOML_1" > "${TEST_TOML_1}.out"
-STANZA_COUNT_1=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_1}.out" || true)
-[ "${STANZA_COUNT_1:-0}" -eq 1 ] && \
-  assert_test "tasks/01_minikube_gvisor.yml: Real awk script appends runsc stanza when missing" 0 || \
-  assert_test "tasks/01_minikube_gvisor.yml: Real awk script appends runsc stanza when missing" 1
+# Extract the real version-aware containerd drop-in script from tasks/01_minikube_gvisor.yml and execute against containerd 1.x (v2) & 2.x (v3)
+CTD_SCRIPT_FILE="${MOCK_TMP_DIR}/reconcile_containerd.sh"
+sed -n '/# BEGIN_CONTAINERD_DROPIN_RECONCILE/,/# END_CONTAINERD_DROPIN_RECONCILE/p' "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" | sed 's/^    //' > "$CTD_SCRIPT_FILE"
+chmod +x "$CTD_SCRIPT_FILE"
 
-TEST_TOML_2="${MOCK_TMP_DIR}/test2.toml"
-cat << 'EOF' > "$TEST_TOML_2"
+# Test A: containerd 1.7.20 (config v2), stripping "cri" from disabled_plugins & duplicate inline runsc stanzas, plus idempotent second pass
+(
+    CTD1_DIR="${MOCK_TMP_DIR}/ctd1"
+    mkdir -p "${CTD1_DIR}/bin" "${CTD1_DIR}/conf.d"
+    cat << 'EOF' > "${CTD1_DIR}/bin/containerd"
+#!/bin/sh
+if [ "$1" = "--version" ]; then echo "containerd github.com/containerd/containerd v1.7.20 8fc6bcff51318944179630522a095cc9dbf9f353"; fi
+EOF
+    chmod +x "${CTD1_DIR}/bin/containerd"
+    cat << 'EOF' > "${CTD1_DIR}/config.toml"
+disabled_plugins = ["cri"]
 [plugins."io.containerd.grpc.v1.cri"]
   sandbox_image = "registry.k8s.io/pause:3.9"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
@@ -603,11 +604,46 @@ cat << 'EOF' > "$TEST_TOML_2"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
 EOF
-awk "$TOML_AWK_SCRIPT" "$TEST_TOML_2" > "${TEST_TOML_2}.out"
-STANZA_COUNT_2=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_2}.out" || true)
-[ "${STANZA_COUNT_2:-0}" -eq 1 ] && \
-  assert_test "tasks/01_minikube_gvisor.yml: Real awk script deduplicates multiple runsc stanzas to 1" 0 || \
-  assert_test "tasks/01_minikube_gvisor.yml: Real awk script deduplicates multiple runsc stanzas to 1" 1
+    export PATH="${CTD1_DIR}/bin:${PATH}"
+    export CONFIG_PATH="${CTD1_DIR}/config.toml" CONF_D_DIR="${CTD1_DIR}/conf.d" DROPIN_PATH="${CTD1_DIR}/conf.d/10-gvisor-runsc.toml"
+    export PAUSE_IMAGE="registry.k8s.io/pause:3.10" CONTAINERD_NO_SUDO=1 SKIP_CONTAINERD_RESTART=1 SKIP_CRICTL_CHECK=1
+    bash "$CTD_SCRIPT_FILE"
+    grep -q 'disabled_plugins = \[\]' "$CONFIG_PATH" && \
+    ! grep -q 'containerd.runtimes.runsc' "$CONFIG_PATH" && \
+    grep -q "imports = \[\"${CONF_D_DIR}/\*.toml\"\]" "$CONFIG_PATH" && \
+    grep -q '^version = 2' "$DROPIN_PATH" && \
+    grep -q 'io.containerd.grpc.v1.cri' "$DROPIN_PATH" && \
+    grep -q 'SystemdCgroup = true' "$DROPIN_PATH" && \
+    grep -q 'runtime_type = "io.containerd.runsc.v1"' "$DROPIN_PATH" && \
+    bash "$CTD_SCRIPT_FILE"
+) && assert_test "tasks/01_minikube_gvisor.yml: Live containerd 1.x (v2) reconciles conf.d drop-in, strips disabled cri & deduplicates runsc idempotently" 0 || \
+    assert_test "tasks/01_minikube_gvisor.yml: Live containerd 1.x (v2) drop-in reconciliation failed" 1
+
+# Test B: containerd 2.2.0 (config v3, omitted SystemdCgroup in default config)
+(
+    CTD2_DIR="${MOCK_TMP_DIR}/ctd2"
+    mkdir -p "${CTD2_DIR}/bin" "${CTD2_DIR}/conf.d"
+    cat << 'EOF' > "${CTD2_DIR}/bin/containerd"
+#!/bin/sh
+if [ "$1" = "--version" ]; then echo "containerd github.com/containerd/containerd/v2 v2.2.0 1234567890abcdef"; fi
+EOF
+    chmod +x "${CTD2_DIR}/bin/containerd"
+    cat << 'EOF' > "${CTD2_DIR}/config.toml"
+version = 3
+root = "/var/lib/containerd"
+EOF
+    export PATH="${CTD2_DIR}/bin:${PATH}"
+    export CONFIG_PATH="${CTD2_DIR}/config.toml" CONF_D_DIR="${CTD2_DIR}/conf.d" DROPIN_PATH="${CTD2_DIR}/conf.d/10-gvisor-runsc.toml"
+    export PAUSE_IMAGE="registry.k8s.io/pause:3.10" CONTAINERD_NO_SUDO=1 SKIP_CONTAINERD_RESTART=1 SKIP_CRICTL_CHECK=1
+    bash "$CTD_SCRIPT_FILE"
+    grep -q '^version = 3' "$DROPIN_PATH" && \
+    grep -q "io.containerd.cri.v1.images" "$DROPIN_PATH" && \
+    grep -q "io.containerd.cri.v1.runtime" "$DROPIN_PATH" && \
+    grep -q "SystemdCgroup = true" "$DROPIN_PATH" && \
+    grep -q "runtime_type = 'io.containerd.runsc.v1'" "$DROPIN_PATH" && \
+    bash "$CTD_SCRIPT_FILE"
+) && assert_test "tasks/01_minikube_gvisor.yml: Live containerd 2.x (v3) renders version=3 drop-in with pinned_images, SystemdCgroup=true & runsc" 0 || \
+    assert_test "tasks/01_minikube_gvisor.yml: Live containerd 2.x (v3) drop-in reconciliation failed" 1
 
 # Verify zero unreachable/dead tasks across all 00_host_prep*.yml files (every task must carry 'preflight' tag)
 if [ -n "$RUNTIME_TEST_PY" ]; then
@@ -938,7 +974,7 @@ fi
 
 # Matrix Flows 4 & 5 Test: 00_host_prep_rocky.yml handles curl-minimal and ensures docker group exists
 if grep -q "curl-minimal" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
-   grep -q -- "--allowerasing" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "allowerasing: true" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
    grep -q "Ensure docker group exists" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
    grep -q "Ensure docker group exists" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
     assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 0
@@ -1243,12 +1279,15 @@ REQUIRED_MANIFESTS=(
     "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2"
     "${K8S_DIR}/testkube/templates/test-workflow-security.yaml.j2"
     "${K8S_DIR}/testkube/templates/test-workflow-sustained-load.yaml.j2"
+    "${K8S_DIR}/ansible/requirements.yml"
     "${K8S_DIR}/ansible/group_vars/all.yml"
     "${K8S_DIR}/ansible/playbooks/site.yml"
     "${K8S_DIR}/ansible/tasks/00_host_prep.yml"
+    "${K8S_DIR}/ansible/tasks/00_host_prep_preflight_assert.yml"
     "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"
     "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"
     "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"
+    "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml"
     "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml"
     "${K8S_DIR}/ansible/tasks/02_k8s_stack.yml"
 )
@@ -1461,6 +1500,105 @@ if [ -n "$stat_line" ] && [ -n "$exe_line" ] && [ "$stat_line" -lt "$exe_line" ]
     assert_test "tasks/00_host_prep.yml: checks /usr/bin/sudo.ws via ansible.builtin.stat (line ${stat_line}) before switching ansible_become_exe (line ${exe_line})" 0
 else
     assert_test "tasks/00_host_prep.yml: checks /usr/bin/sudo.ws via ansible.builtin.stat before switching ansible_become_exe" 1
+fi
+
+# Verify zero deprecated injected ansible_* fact variables across ansible/ (ansible-core 2.20 / 2.24 INJECT_FACTS_AS_VARS=False compatibility)
+if ! grep -rnE '\bansible_(os_family|distribution|default_ipv4|pkg_mgr|hostname|architecture|system|user_id|env|memtotal_mb|service_mgr|python_version|kernel|selinux)\b' "${K8S_DIR}/ansible/" >/dev/null 2>&1; then
+    assert_test "ansible/: Zero deprecated injected ansible_* fact variables (uses ansible_facts['...'] exclusively)" 0
+else
+    assert_test "ansible/: Deprecated injected ansible_* fact variables detected" 1
+fi
+
+# Verify Ansible collections manifest & bootstrap_cluster.sh installer + play-level handlers & Sync Gates
+if grep -q "ansible.posix" "${K8S_DIR}/ansible/requirements.yml" && \
+   grep -q "community.general" "${K8S_DIR}/ansible/requirements.yml" && \
+   grep -q "ensure_ansible_collections" "${BOOTSTRAP_SCRIPT}" && \
+   grep -q "handlers:" "${K8S_DIR}/ansible/playbooks/site.yml" && \
+   grep -q "ansible.builtin.meta: flush_handlers" "${K8S_DIR}/ansible/playbooks/site.yml" && \
+   grep -q "ansible.builtin.setup:" "${K8S_DIR}/ansible/playbooks/site.yml"; then
+    assert_test "ansible/ & bootstrap_cluster.sh: Declares ansible.posix/community.general, play handlers & flush_handlers/setup sync gates" 0
+else
+    assert_test "ansible/ & bootstrap_cluster.sh: Missing collections manifest, handlers or sync gates" 1
+fi
+
+# Verify pre-mutation compliance assertions, cross-OS Linux networking, firewall, swap/zram & native apt/dnf modules
+if grep -q "python_version" "${K8S_DIR}/ansible/tasks/00_host_prep_preflight_assert.yml" && \
+   grep -q "ldd --version" "${K8S_DIR}/ansible/tasks/00_host_prep_preflight_assert.yml" && \
+   grep -q "community.general.modprobe:" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "persistent: present" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "ansible.posix.sysctl:" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "ManageForeignRoutes=no" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "unmanaged-devices=" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "nm-cloud-setup.service" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "ansible.posix.firewalld:" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "community.general.ufw:" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "zram-generator.conf" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "ansible.posix.selinux:" "${K8S_DIR}/ansible/tasks/00_host_prep_linux_network.yml" && \
+   grep -q "ansible.builtin.yum_repository:" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "ansible.builtin.dnf:" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; then
+    assert_test "tasks/00_host_prep_*.yml: Enforces preflight assertions, native modprobe/sysctl/firewalld/ufw/selinux/dnf/apt & zram guards" 0
+else
+    assert_test "tasks/00_host_prep_*.yml: Cross-OS preflight, network, firewall, swap or native package tasks missing" 1
+fi
+
+# Verify Ansible playbooks & tasks against ansible-playbook-creator structural & security rules
+if [ -n "$RUNTIME_TEST_PY" ]; then
+    if "$RUNTIME_TEST_PY" -c '
+import yaml, glob, os
+k8s_dir = os.environ["K8S_DIR"]
+plays = yaml.safe_load(open(os.path.join(k8s_dir, "ansible/playbooks/site.yml")))
+assert isinstance(plays, list) and len(plays) >= 1
+for p in plays:
+    assert p.get("name"), "Play missing name"
+    hosts = str(p.get("hosts", ""))
+    assert hosts and hosts not in ("*", "all"), f"Wildcard hosts forbidden: {hosts}"
+    assert "gather_facts" in p, "Play missing explicit gather_facts"
+    assert "become" in p and p.get("become_method") == "sudo", "Play missing explicit become / become_method=sudo"
+    for h in p.get("handlers", []):
+        assert h.get("name") and h.get("listen"), f"Handler missing name or listen: {h}"
+
+unsafe = ["become_pass", "validate_certs: false", "verify_ssl: false", "insecure: true", "no_log: false"]
+for f in sorted(glob.glob(os.path.join(k8s_dir, "ansible/tasks/*.yml"))):
+    raw = open(f).read().lower()
+    for pat in unsafe:
+        assert pat not in raw, f"Unsafe pattern {pat} in {f}"
+    for t in (yaml.safe_load(open(f)) or []):
+        tname = t.get("name", "")
+        assert tname, f"Task missing name in {f}"
+        if "debug" in t or "ansible.builtin.debug" in t:
+            dbg = t.get("ansible.builtin.debug") or t.get("debug") or {}
+            assert "msg" in dbg, f"Debug task prefers msg over var in {f}: {tname}"
+        if any(k in t for k in ("ansible.builtin.shell", "ansible.builtin.command", "shell", "command")):
+            args = str(t.get("args", ""))
+            assert "changed_when" in t or "creates" in args, f"shell/command missing changed_when in {f}: {tname}"
+' >/dev/null 2>&1; then
+        assert_test "ansible/: Passes ansible-playbook-creator structural, non-wildcard hosts, become_method, changed_when & security scan" 0
+    else
+        assert_test "ansible/: Failed ansible-playbook-creator structural/security scan" 1
+    fi
+elif command -v ruby >/dev/null 2>&1; then
+    if ruby -ryaml -e '
+    k8s = ENV["K8S_DIR"]
+    plays = YAML.load_file(File.join(k8s, "ansible/playbooks/site.yml"))
+    plays.each do |p|
+      raise "bad play" unless p["name"] && p["hosts"] && !["*", "all"].include?(p["hosts"].to_s) && p.key?("gather_facts") && p.key?("become") && p["become_method"] == "sudo"
+      (p["handlers"] || []).each { |h| raise "bad handler" unless h["name"] && h["listen"] }
+    end
+    Dir.glob(File.join(k8s, "ansible/tasks/*.yml")).sort.each do |f|
+      raw = File.read(f).downcase
+      ["become_pass", "validate_certs: false", "verify_ssl: false", "insecure: true", "no_log: false"].each { |u| raise u if raw.include?(u) }
+      (YAML.load_file(f) || []).each do |t|
+        raise "missing name" unless t["name"]
+        if ["ansible.builtin.shell", "ansible.builtin.command", "shell", "command"].any? { |k| t.key?(k) }
+          raise "missing changed_when" unless t.key?("changed_when") || t.dig("args", "creates")
+        end
+      end
+    end
+    ' >/dev/null 2>&1; then
+        assert_test "ansible/: Passes ansible-playbook-creator structural, non-wildcard hosts, become_method, changed_when & security scan" 0
+    else
+        assert_test "ansible/: Failed ansible-playbook-creator structural/security scan" 1
+    fi
 fi
 
 # ==============================================================================

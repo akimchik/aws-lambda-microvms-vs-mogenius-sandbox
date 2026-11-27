@@ -20,34 +20,35 @@
   check_mode: false
   tags: [always, preflight, host-prep]
 
-- name: "[0/8 Rocky] Install base utilities via dnf/yum"
-  ansible.builtin.shell: |
-    set -e
-    PACKAGES=""
-    command -v tar >/dev/null 2>&1 || PACKAGES="$PACKAGES tar"
-    command -v jq >/dev/null 2>&1 || PACKAGES="$PACKAGES jq"
-    command -v bzip2 >/dev/null 2>&1 || PACKAGES="$PACKAGES bzip2"
-    command -v ps >/dev/null 2>&1 || PACKAGES="$PACKAGES procps-ng"
-    command -v openssl >/dev/null 2>&1 || PACKAGES="$PACKAGES openssl"
-    if ! command -v curl >/dev/null 2>&1; then
-      if command -v dnf >/dev/null 2>&1 && dnf info curl-minimal >/dev/null 2>&1; then
-        PACKAGES="$PACKAGES curl-minimal"
-      else
-        PACKAGES="$PACKAGES curl"
-      fi
-    fi
-    if [ -n "$PACKAGES" ]; then
-      if command -v dnf >/dev/null 2>&1; then
-        dnf install -y --allowerasing $PACKAGES ca-certificates || dnf install -y $PACKAGES ca-certificates
-      elif command -v yum >/dev/null 2>&1; then
-        yum install -y $PACKAGES ca-certificates
-      fi
-    fi
-  args:
-    executable: /bin/bash
+- name: "[0/8 Rocky] Install base utilities via dnf"
+  ansible.builtin.dnf:
+    name:
+      - tar
+      - jq
+      - bzip2
+      - procps-ng
+      - openssl
+      - ca-certificates
+      - iproute-tc
+      - conntrack-tools
+      - socat
+    state: present
+    allowerasing: true
+    install_weak_deps: "{{ false if (ansible_facts['distribution_major_version'] | default('9') | int >= 10) else true }}"
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - "'MISSING:' in base_utils_check.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Install curl-minimal via dnf if curl missing"
+  ansible.builtin.dnf:
+    name: curl-minimal
+    state: present
+    allowerasing: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - "'MISSING:curl' in base_utils_check.stdout"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
@@ -152,23 +153,32 @@
   ignore_errors: true
   ignore_unreachable: true
   failed_when: false
+  notify: Re-exec systemd manager
   when:
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep, sysctl, nofile]
 
-- name: "[0/8 Rocky] Reload kernel sysctl and re-exec systemd daemon"
-  ansible.builtin.shell: |
-    sysctl -p /etc/sysctl.d/99-kubernetes-sandbox.conf >/dev/null 2>&1 || true
-    systemctl daemon-reexec >/dev/null 2>&1 || true
-  args:
-    executable: /bin/bash
+- name: "[0/8 Rocky] Reload kernel sysctl via ansible.posix.sysctl drop-in"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-sandbox.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop:
+    - { key: "fs.file-max", value: "{{ nofile_controls.linux.fs_file_max }}" }
+    - { key: "fs.nr_open", value: "{{ nofile_controls.linux.fs_nr_open }}" }
+    - { key: "fs.inotify.max_user_watches", value: "{{ k8s_sysctl_params['fs.inotify.max_user_watches'] }}" }
+    - { key: "fs.inotify.max_user_instances", value: "{{ k8s_sysctl_params['fs.inotify.max_user_instances'] }}" }
+    - { key: "vm.max_map_count", value: "{{ k8s_sysctl_params['vm.max_map_count'] }}" }
+    - { key: "net.ipv4.ip_forward", value: "{{ k8s_sysctl_params['net.ipv4.ip_forward'] }}" }
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
   ignore_unreachable: true
   failed_when: false
-  changed_when: true
   when:
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
@@ -326,27 +336,31 @@
 # ------------------------------------------------------------------------------
 # Secure Docker CE Installation & Service Activation
 # ------------------------------------------------------------------------------
-- name: "[0/8 Rocky] Install Docker CE repository and packages via dnf/yum if missing"
-  ansible.builtin.shell: |
-    set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
-    if ! command -v docker >/dev/null 2>&1; then
-      if [ ! -f /etc/yum.repos.d/docker-ce.repo ]; then
-        curl -fsSL https://download.docker.com/linux/centos/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo 2>/dev/null || \
-          curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
-      fi
-      if command -v dnf >/dev/null 2>&1; then
-        dnf install -y --allowerasing docker-ce docker-ce-cli containerd.io || \
-          curl -fsSL https://get.docker.com | sh
-      elif command -v yum >/dev/null 2>&1; then
-        yum install -y docker-ce docker-ce-cli containerd.io || \
-          curl -fsSL https://get.docker.com | sh
-      fi
-    fi
-  args:
-    executable: /bin/bash
+- name: "[0/8 Rocky] Install Docker CE repository (docker-ce.repo) via yum_repository"
+  ansible.builtin.yum_repository:
+    name: docker-ce-stable
+    description: "Docker CE Stable - $basearch"
+    file: docker-ce
+    baseurl: "https://download.docker.com/linux/centos/$releasever/$basearch/stable"
+    gpgcheck: true
+    gpgkey: "https://download.docker.com/linux/centos/gpg"
+    enabled: true
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  changed_when: true
+  when:
+    - "'MISSING:docker' in cli_audit_rocky.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Install Docker CE packages via dnf if missing"
+  ansible.builtin.dnf:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    state: present
+    allowerasing: true
+    install_weak_deps: "{{ false if (ansible_facts['distribution_major_version'] | default('9') | int >= 10) else true }}"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - "'MISSING:docker' in cli_audit_rocky.stdout"
     - not (dry_run_mode | bool)

@@ -1,0 +1,375 @@
+---
+# ==============================================================================
+# Cross-OS Linux Kernel Modules, sysctl.d Precedence, rp_filter max() Parity,
+# Network Daemons, Firewalld/UFW, Swap/zram, and Scoped SELinux Automation
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Gap 2: Persistent Kernel Modules (overlay, br_netfilter) & High-Precedence sysctl.d
+# ------------------------------------------------------------------------------
+- name: "[0/8 Linux Net] Check if host /lib/modules/{{ ansible_facts['kernel'] }} exists"
+  ansible.builtin.stat:
+    path: "/lib/modules/{{ ansible_facts['kernel'] }}"
+  register: host_kernel_modules_dir
+  check_mode: false
+  tags: [always, preflight, host-prep, sysctl]
+
+- name: "[0/8 Linux Net] Load and persist overlay & br_netfilter kernel modules"
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+    persistent: present
+  loop:
+    - overlay
+    - br_netfilter
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - not (dry_run_mode | bool)
+    - host_kernel_modules_dir.stat.exists | default(false)
+  tags: [preflight, host-prep, sysctl]
+
+- name: "[0/8 Linux Net] Apply high-precedence Kubernetes routing sysctls (/etc/sysctl.d/99-kubernetes-cri.conf)"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop:
+    - { key: "net.ipv4.ip_forward", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+    - { key: "net.ipv4.conf.all.rp_filter", value: "{{ k8s_rp_filter_mode | default('2') }}" }
+    - { key: "net.ipv4.conf.default.rp_filter", value: "{{ k8s_rp_filter_mode | default('2') }}" }
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep, sysctl]
+
+- name: "[0/8 Linux Net] Apply uniform rp_filter ({{ k8s_rp_filter_mode | default('2') }}) across active non-loopback interfaces (prevents max() drop)"
+  ansible.posix.sysctl:
+    name: "net.ipv4.conf.{{ item }}.rp_filter"
+    value: "{{ k8s_rp_filter_mode | default('2') }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop: "{{ ansible_facts['interfaces'] | default([]) | reject('equalto', 'lo') | reject('match', '^(veth|br-|docker|cni|flannel|cali|virbr).*') | list }}"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: true
+  failed_when: false
+  when:
+    - configure_linux_sysctl | bool
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep, sysctl]
+
+- name: "[Sync Gate 1] Flush handlers after kernel module & sysctl configuration"
+  ansible.builtin.meta: flush_handlers
+  tags: [always, preflight, host-prep, sysctl]
+
+# ------------------------------------------------------------------------------
+# Gap 3: OS Network Daemons (systemd-networkd, NetworkManager, nm-cloud-setup, systemd-resolved)
+# ------------------------------------------------------------------------------
+- name: "[0/8 Linux Net] Gather systemd service facts for network daemons and firewalls"
+  ansible.builtin.service_facts:
+  check_mode: false
+  failed_when: false
+  when: ansible_facts['service_mgr'] == 'systemd'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Linux Net] Ensure /etc/systemd/networkd.conf.d directory exists"
+  ansible.builtin.file:
+    path: /etc/systemd/networkd.conf.d
+    state: directory
+    mode: "0755"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - k8s_configure_network_daemons | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('systemd-networkd.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Configure systemd-networkd ManageForeignRoutes=no & ManageForeignRoutingPolicyRules=no"
+  ansible.builtin.copy:
+    dest: /etc/systemd/networkd.conf.d/99-k8s-cni.conf
+    mode: "0644"
+    content: |
+      [Network]
+      ManageForeignRoutes=no
+      ManageForeignRoutingPolicyRules=no
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  notify: Restart systemd-networkd
+  when:
+    - k8s_configure_network_daemons | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('systemd-networkd.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Ensure /etc/NetworkManager/conf.d directory exists"
+  ansible.builtin.file:
+    path: /etc/NetworkManager/conf.d
+    state: directory
+    mode: "0755"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - k8s_configure_network_daemons | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('NetworkManager.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Exclude virtual CNI interfaces from NetworkManager via unmanaged-devices"
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/conf.d/90-k8s-cni.conf
+    mode: "0644"
+    content: |
+      [keyfile]
+      unmanaged-devices={{ k8s_cni_unmanaged_interfaces }}
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  notify: Reload NetworkManager
+  when:
+    - k8s_configure_network_daemons | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('NetworkManager.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Disable and stop nm-cloud-setup units when present"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - nm-cloud-setup.service
+    - nm-cloud-setup.timer
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_configure_network_daemons | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts['service_mgr'] == 'systemd'
+    - item in (ansible_facts.get('services', {}) | list)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Inspect systemd-resolved upstream resolv.conf when active"
+  ansible.builtin.stat:
+    path: /run/systemd/resolve/resolv.conf
+  register: resolved_upstream_stat
+  check_mode: false
+  when: ansible_facts.get('services', {}).get('systemd-resolved.service', {}).get('state', '') == 'running'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Linux Net] Verify systemd-resolved upstream resolv.conf contains non-loopback nameservers"
+  ansible.builtin.command: grep -E '^nameserver[[:space:]]+' /run/systemd/resolve/resolv.conf
+  register: resolved_upstream_ns
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - ansible_facts.get('services', {}).get('systemd-resolved.service', {}).get('state', '') == 'running'
+    - resolved_upstream_stat.stat.exists | default(false)
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Linux Net] Warn if systemd-resolved lacks non-loopback upstream nameservers (CoreDNS loop risk)"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: systemd-resolved is active but /run/systemd/resolve/resolv.conf has no non-loopback nameserver entries.
+      Ensure DHCP/systemd-resolved populates upstream DNS before starting CoreDNS to prevent Loop CrashLoopBackOff.
+  when:
+    - ansible_facts.get('services', {}).get('systemd-resolved.service', {}).get('state', '') == 'running'
+    - not (resolved_upstream_stat.stat.exists | default(false)) or ((resolved_upstream_ns.stdout | default('') | regex_replace('nameserver\\s+127\\.0\\.0\\.\\d+', '') | trim) | length) == 0
+  tags: [always, preflight, host-prep]
+
+- name: "[Sync Gate 1B] Flush network daemon handlers immediately"
+  ansible.builtin.meta: flush_handlers
+  tags: [always, preflight, host-prep]
+
+# ------------------------------------------------------------------------------
+# Gap 4: Cross-OS Firewall (firewalld / ufw) & Netfilter Split-Brain Audit
+# ------------------------------------------------------------------------------
+- name: "[0/8 Linux Net] Audit nft CLI and iptables versions (netfilter parity)"
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "nft --version"
+    - "iptables --version"
+  register: netfilter_tool_audit
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Linux Net] Report host netfilter tooling & Kubernetes 1.35+ nftables readiness"
+  ansible.builtin.debug:
+    msg: >-
+      Netfilter audit: nft='{{ (netfilter_tool_audit.results[0].stdout | default('not installed')) | trim }}' |
+      iptables='{{ (netfilter_tool_audit.results[1].stdout | default('not installed')) | trim }}' |
+      kernel_nftables_ready={{ (ansible_facts['kernel'] | regex_search('^[0-9]+\\.[0-9]+')) is version(k8s_min_linux_kernel_nftables | default('5.13'), '>=') }}
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Linux Net] Disable firewalld when k8s_firewall_mode == 'disable'"
+  ansible.builtin.systemd:
+    name: firewalld.service
+    enabled: false
+    state: stopped
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_firewall_mode == 'disable'
+    - not (dry_run_mode | bool)
+    - "'firewalld.service' in (ansible_facts.get('services', {}) | list)"
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Enable firewalld boolean masquerade (permanent & immediate) when k8s_firewall_mode == 'configure'"
+  ansible.posix.firewalld:
+    masquerade: true
+    state: enabled
+    permanent: true
+    immediate: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_firewall_mode == 'configure'
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('firewalld.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Open Kubernetes & NodePort ports in firewalld (permanent & immediate)"
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    state: enabled
+    permanent: true
+    immediate: true
+  loop:
+    - 6443/tcp
+    - 10250/tcp
+    - 8443/tcp
+    - 30000-32767/tcp
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_firewall_mode == 'configure'
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('firewalld.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Allow routed forwarding in UFW when k8s_firewall_mode == 'configure'"
+  community.general.ufw:
+    direction: routed
+    policy: allow
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_firewall_mode == 'configure'
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('ufw.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Open Kubernetes API & kubelet ports in UFW"
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "6443"
+    - "10250"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_firewall_mode == 'configure'
+    - not (dry_run_mode | bool)
+    - ansible_facts.get('services', {}).get('ufw.service', {}).get('state', '') == 'running'
+  tags: [preflight, host-prep]
+
+# ------------------------------------------------------------------------------
+# Gap 5: Reboot-Persistent Swap & systemd-zram-generator Neutralization
+# ------------------------------------------------------------------------------
+- name: "[0/8 Linux Net] Check active swap partitions/zram devices (swapon --noheadings)"
+  ansible.builtin.command: swapon --noheadings
+  register: active_swap_out
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: k8s_disable_swap | bool
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Disable active swap immediately (swapoff -a)"
+  ansible.builtin.command: swapoff -a
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  changed_when: true
+  when:
+    - k8s_disable_swap | bool
+    - not (dry_run_mode | bool)
+    - (active_swap_out.stdout | default('') | trim | length) > 0
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Comment out swap entries in /etc/fstab for reboot persistence"
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#\n].*[ \t]+swap[ \t]+.*)$'
+    replace: '# \1'
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_disable_swap | bool
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Stop active swap-create@zram0 unit if present"
+  ansible.builtin.systemd:
+    name: swap-create@zram0
+    state: stopped
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - k8s_disable_swap | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts['service_mgr'] == 'systemd'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Write empty /etc/systemd/zram-generator.conf to neutralize zram on reboot"
+  ansible.builtin.copy:
+    dest: /etc/systemd/zram-generator.conf
+    mode: "0644"
+    content: "# Disabled by Ansible Kubernetes host preflight\n"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  notify: Reload systemd daemon
+  when:
+    - k8s_disable_swap | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts['service_mgr'] == 'systemd'
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Linux Net] Mask systemd-zram-setup@.service"
+  ansible.builtin.systemd:
+    name: systemd-zram-setup@.service
+    masked: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  notify: Reload systemd daemon
+  when:
+    - k8s_disable_swap | bool
+    - not (dry_run_mode | bool)
+    - ansible_facts['service_mgr'] == 'systemd'
+  tags: [preflight, host-prep]
+
+# ------------------------------------------------------------------------------
+# Gap 8B: Scoped SELinux Handling (RedHat-family Hosts with Active SELinux Only)
+# ------------------------------------------------------------------------------
+- name: "[0/8 Linux Net] Reconcile SELinux state on RedHat-family hosts when enabled"
+  ansible.posix.selinux:
+    policy: targeted
+    state: "{{ k8s_selinux_state | default('permissive') }}"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['selinux'] is defined
+    - ansible_facts['selinux']['status'] | default('disabled') != 'disabled'
+    - configure_linux_sysctl | bool
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]

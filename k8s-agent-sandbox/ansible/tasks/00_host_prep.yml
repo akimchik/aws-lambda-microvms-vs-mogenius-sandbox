@@ -38,6 +38,10 @@
     msg: "Host={{ ansible_facts['system'] }} ({{ ansible_facts['os_family'] }}) | Arch={{ ansible_facts['architecture'] }} (CLI={{ cli_arch }}, gVisor={{ runsc_arch }}) | PkgMgr={{ host_pkg_mgr }}"
   tags: [always, preflight, host-prep]
 
+- name: "[0/8] Run read-only pre-mutation host compliance assertions"
+  ansible.builtin.import_tasks: 00_host_prep_preflight_assert.yml
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8] Include macOS (Darwin) host preparation tasks (Flow 1)"
   ansible.builtin.import_tasks: 00_host_prep_darwin.yml
   when: ansible_facts['system'] == 'Darwin'
@@ -52,3 +56,8 @@
   ansible.builtin.import_tasks: 00_host_prep_rocky.yml
   when: ansible_facts['system'] == 'Linux' and ansible_facts['os_family'] == 'RedHat'
   tags: [preflight, host-prep, sysctl, nofile, vm-optimize]
+
+- name: "[0/8] Include Cross-OS Linux kernel modules, rp_filter, network daemons, firewall & swap preparation"
+  ansible.builtin.import_tasks: 00_host_prep_linux_network.yml
+  when: ansible_facts['system'] == 'Linux'
+  tags: [preflight, host-prep, sysctl, nofile]

@@ -63,12 +63,13 @@
     kubectl label node {{ minikube_worker_node }} dedicated=testkube node-role.kubernetes.io/worker=testkube --overwrite >/dev/null
     kubectl taint node {{ minikube_worker_node }} dedicated=testkube:NoSchedule --overwrite >/dev/null 2>&1 || true
 
-    # Configure high-concurrency inotify and open file limits inside Minikube nodes to prevent 'failed to create fsnotify watcher: too many open files'
+    # Configure high-concurrency inotify, bridge iptables, rp_filter and open file limits inside Minikube nodes
     for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-      minikube ssh -n "$node" "sudo sysctl -w fs.inotify.max_user_watches={{ k8s_sysctl_params['fs.inotify.max_user_watches'] }} fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }} fs.file-max={{ nofile_controls.linux.fs_file_max }} vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }} 2>/dev/null || true" >/dev/null 2>&1 || true
+      minikube ssh -n "$node" "sudo sysctl -w fs.inotify.max_user_watches={{ k8s_sysctl_params['fs.inotify.max_user_watches'] }} fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }} fs.file-max={{ nofile_controls.linux.fs_file_max }} vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }} net.ipv4.ip_forward=1 net.bridge.bridge-nf-call-iptables=1 net.ipv4.conf.all.rp_filter={{ k8s_rp_filter_mode | default('2') }} 2>/dev/null || true" >/dev/null 2>&1 || true
     done
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [minikube]
 
@@ -99,7 +100,7 @@
   when: not (dry_run_mode | bool)
   tags: [minikube, gvisor]
 
-- name: "[3/8] Reconcile native Google gVisor (runsc), deduplicate containerd config.toml, and register RuntimeClass"
+- name: "[3/8] Reconcile native Google gVisor (runsc), version-aware containerd drop-in (v2/v3 + SystemdCgroup), CRI sync gate & RuntimeClass"
   ansible.builtin.shell: |
     set -euo pipefail
     minikube ssh "sudo rm -f /etc/apt/sources.list.d/*kubic*.list /etc/apt/sources.list.d/*cri-o*.list 2>/dev/null || true"
@@ -130,35 +131,112 @@
       rm -rf /tmp/gvisor_unpack /tmp/gvisor_raw.tar
     fi
 
-    minikube ssh '
+    minikube ssh 'PAUSE_IMAGE="{{ k8s_pause_image | default("registry.k8s.io/pause:3.10") }}" bash -s' <<'CONTAINERD_EOF'
+    # BEGIN_CONTAINERD_DROPIN_RECONCILE
     set -euo pipefail
-    CONFIG_PATH="/etc/containerd/config.toml"
-    if [ ! -f "$CONFIG_PATH" ]; then
-      sudo mkdir -p /etc/containerd
-      containerd config default | sudo tee "$CONFIG_PATH" >/dev/null
+    CONFIG_PATH="${CONFIG_PATH:-/etc/containerd/config.toml}"
+    CONF_D_DIR="${CONF_D_DIR:-/etc/containerd/conf.d}"
+    DROPIN_PATH="${DROPIN_PATH:-${CONF_D_DIR}/10-gvisor-runsc.toml}"
+    PAUSE_IMAGE="${PAUSE_IMAGE:-registry.k8s.io/pause:3.10}"
+    SUDO_CMD=""
+    if [ "$(id -u)" -ne 0 ] && [ -z "${CONTAINERD_NO_SUDO:-}" ]; then
+      SUDO_CMD="sudo"
     fi
-    awk '\''
-    BEGIN { in_dup = 0; seen = 0; }
-    index($0, "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]") == 1 {
-      seen = seen + 1;
-      if (seen > 1) { in_dup = 1; next; }
-      print; next;
+
+    $SUDO_CMD mkdir -p "$(dirname "$CONFIG_PATH")" "$CONF_D_DIR"
+    if [ ! -f "$CONFIG_PATH" ]; then
+      containerd config default | $SUDO_CMD tee "$CONFIG_PATH" >/dev/null
+    fi
+
+    CTD_VER_STR=$(containerd --version 2>/dev/null || echo "")
+    CTD_MAJOR=$(printf '%s\n' "$CTD_VER_STR" | grep -oE '(^|[[:space:]])v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | tr -d 'v[:space:]' | cut -d. -f1)
+    CTD_MAJOR="${CTD_MAJOR:-1}"
+
+    TMP_CONFIG="/tmp/config.toml.clean.$$"
+    TMP_DROPIN="/tmp/10-gvisor-runsc.toml.$$"
+
+    # Strip any duplicate inline runsc runtime blocks (delegated to drop-in), strip "cri" from disabled_plugins, and ensure imports includes conf.d
+    awk -v conf_glob="${CONF_D_DIR}/*.toml" '
+    BEGIN { in_runsc = 0; has_imports = 0; }
+    /^\[plugins\..*\.containerd\.runtimes\.runsc\]/ { in_runsc = 1; next; }
+    /^\[/ { in_runsc = 0; }
+    {
+      if (in_runsc) { next; }
+      if ($0 ~ /^[[:space:]]*disabled_plugins[[:space:]]*=/) {
+        gsub(/"cri"[[:space:]]*,?[[:space:]]*/, "", $0);
+        gsub(/,[[:space:]]*\]/, "]", $0);
+      }
+      if ($0 ~ /^[[:space:]]*imports[[:space:]]*=/ && index($0, conf_glob) > 0) {
+        has_imports = 1;
+      }
+      print;
     }
-    index($0, "[") == 1 { in_dup = 0; }
-    { if (in_dup) { next; } print; }
     END {
-      if (seen == 0) {
-        printf "\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]\n  runtime_type = \"io.containerd.runsc.v1\"\n";
+      if (!has_imports) {
+        printf "\nimports = [\"%s\"]\n", conf_glob;
       }
     }
-    '\'' "$CONFIG_PATH" > /tmp/config.toml.clean
-    if ! cmp -s "$CONFIG_PATH" /tmp/config.toml.clean; then
-      sudo mv /tmp/config.toml.clean "$CONFIG_PATH"
-      sudo systemctl restart containerd
+    ' "$CONFIG_PATH" > "$TMP_CONFIG"
+
+    if [ "$CTD_MAJOR" -ge 2 ]; then
+      cat > "$TMP_DROPIN" <<TOML_V3
+    # Managed by Ansible: containerd 2.x (config version = 3) with explicit SystemdCgroup = true
+    version = 3
+
+    [plugins.'io.containerd.cri.v1.images'.pinned_images]
+      sandbox = '${PAUSE_IMAGE}'
+
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+      SystemdCgroup = true
+
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]
+      runtime_type = 'io.containerd.runsc.v1'
+    TOML_V3
     else
-      rm -f /tmp/config.toml.clean
+      cat > "$TMP_DROPIN" <<TOML_V2
+    # Managed by Ansible: containerd 1.x (config version = 2) with explicit SystemdCgroup = true
+    version = 2
+
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      SystemdCgroup = true
+
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+      runtime_type = "io.containerd.runsc.v1"
+    TOML_V2
     fi
-    '
+
+    CONTAINERD_CHANGED=0
+    if ! cmp -s "$CONFIG_PATH" "$TMP_CONFIG"; then
+      $SUDO_CMD mv "$TMP_CONFIG" "$CONFIG_PATH"
+      CONTAINERD_CHANGED=1
+    else
+      rm -f "$TMP_CONFIG"
+    fi
+
+    if [ ! -f "$DROPIN_PATH" ] || ! cmp -s "$DROPIN_PATH" "$TMP_DROPIN"; then
+      $SUDO_CMD mv "$TMP_DROPIN" "$DROPIN_PATH"
+      CONTAINERD_CHANGED=1
+    else
+      rm -f "$TMP_DROPIN"
+    fi
+
+    if [ "$CONTAINERD_CHANGED" -eq 1 ] && [ -z "${SKIP_CONTAINERD_RESTART:-}" ]; then
+      $SUDO_CMD systemctl restart containerd
+    fi
+
+    # Sync Gate 3: Verify CRI readiness against containerd socket before creating RuntimeClass
+    if [ -z "${SKIP_CRICTL_CHECK:-}" ]; then
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if $SUDO_CMD crictl --runtime-endpoint unix:///run/containerd/containerd.sock version >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
+      $SUDO_CMD crictl --runtime-endpoint unix:///run/containerd/containerd.sock version >/dev/null
+    fi
+    # END_CONTAINERD_DROPIN_RECONCILE
+    CONTAINERD_EOF
+
     cat <<EOF | kubectl apply -f - >/dev/null
     apiVersion: node.k8s.io/v1
     kind: RuntimeClass
@@ -168,5 +246,6 @@
     EOF
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [gvisor]

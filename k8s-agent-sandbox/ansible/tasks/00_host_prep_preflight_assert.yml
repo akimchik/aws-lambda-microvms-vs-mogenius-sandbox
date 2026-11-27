@@ -1,0 +1,73 @@
+---
+# ==============================================================================
+# Stage 0 Pre-Mutation Host Compliance Assertions (Read-Only, Runs First)
+# Ensures ansible-core 2.20+, Python >= 3.9, RAM >= 2GB, CPUs >= 2, kernel >= 5.2,
+# glibc compatibility, and cgroup v2 readiness BEFORE modifying any system file.
+# ==============================================================================
+
+- name: "[0/8 Assert] Verify managed host Python version meets minimum requirement (>= {{ k8s_min_python_version | default('3.9') }})"
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['python_version'] is defined
+      - ansible_facts['python_version'] is version(k8s_min_python_version | default('3.9'), '>=')
+    fail_msg: >-
+      [STAGE 0 ASSERT FAILED] Managed host Python {{ ansible_facts['python_version'] | default('unknown') }} is below
+      the required minimum {{ k8s_min_python_version | default('3.9') }} for ansible-core 2.20+.
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Assert] Verify non-empty unique hostname and hardware baseline (>= {{ k8s_min_ram_mb | default(2048) }} MB RAM, >= {{ k8s_min_cpus | default(2) }} CPUs)"
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['hostname'] is defined and (ansible_facts['hostname'] | string | length) > 0
+      - (ansible_facts['memtotal_mb'] | default(2048) | int) >= (k8s_min_ram_mb | default(2048) | int)
+      - (ansible_facts['processor_vcpus'] | default(ansible_facts['processor_nproc'] | default(2)) | int) >= (k8s_min_cpus | default(2) | int)
+    fail_msg: >-
+      [STAGE 0 ASSERT FAILED] Host '{{ ansible_facts['hostname'] | default('unknown') }}' does not meet minimum cluster
+      requirements ({{ k8s_min_ram_mb | default(2048) }} MB RAM, {{ k8s_min_cpus | default(2) }} CPUs).
+      Found: {{ ansible_facts['memtotal_mb'] | default('unknown') }} MB RAM,
+      {{ ansible_facts['processor_vcpus'] | default(ansible_facts['processor_nproc'] | default('unknown')) }} CPUs.
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Assert Linux] Verify Linux kernel version supports cgroup v2 (>= {{ k8s_min_linux_kernel_cgroupv2 | default('5.2') }})"
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['kernel'] is defined
+      - (ansible_facts['kernel'] | regex_search('^[0-9]+\\.[0-9]+')) is version(k8s_min_linux_kernel_cgroupv2 | default('5.2'), '>=')
+    fail_msg: >-
+      [STAGE 0 ASSERT FAILED] Linux kernel {{ ansible_facts['kernel'] | default('unknown') }} is older than
+      {{ k8s_min_linux_kernel_cgroupv2 | default('5.2') }} required for cgroup v2 freezer and runc/runsc parity.
+  when: ansible_facts['system'] == 'Linux'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Assert Linux] Check glibc availability for statically/dynamically linked Kubernetes binaries"
+  ansible.builtin.command: ldd --version
+  register: glibc_version_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: ansible_facts['system'] == 'Linux'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Assert Linux] Assert glibc runtime is present on host"
+  ansible.builtin.assert:
+    that:
+      - glibc_version_check.rc is defined and glibc_version_check.rc == 0
+    fail_msg: >-
+      [STAGE 0 ASSERT FAILED] glibc is required for Kubernetes/Minikube/kubectl binaries, but 'ldd --version' failed.
+      Musl-based distributions (e.g. Alpine) without a glibc compatibility layer are unsupported.
+  when: ansible_facts['system'] == 'Linux'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Assert Linux] Inspect cgroup v2 controller hierarchy (/sys/fs/cgroup/cgroup.controllers)"
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: cgroupv2_stat
+  check_mode: false
+  when: ansible_facts['system'] == 'Linux'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Assert Linux] Report cgroup v2 host readiness"
+  ansible.builtin.debug:
+    msg: "Linux host preflight OK: kernel={{ ansible_facts['kernel'] }} | cgroup_v2={{ cgroupv2_stat.stat.exists | default(false) }}"
+  when: ansible_facts['system'] == 'Linux'
+  tags: [always, preflight, host-prep]

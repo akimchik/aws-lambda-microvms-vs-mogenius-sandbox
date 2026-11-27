@@ -13,6 +13,7 @@
     kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [ingress, k8s-stack]
 
@@ -37,6 +38,7 @@
                   -f "${K8S_DIR}/monitoring/grafana-dashboard-testkube.yaml" >/dev/null
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [monitoring, k8s-stack]
 
@@ -75,6 +77,7 @@
     kubectl -n agent-sandbox-system rollout status deployment/sandbox-latency-exporter --timeout=180s
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [agent-sandbox, k8s-stack]
 
@@ -89,6 +92,7 @@
     kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=180s
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [egress-broker, k8s-stack]
 
@@ -132,6 +136,7 @@
     kubectl -n testkube rollout status deployment/testkube-api-server --timeout=180s
   args:
     executable: /bin/bash
+  changed_when: true
   when: not (dry_run_mode | bool)
   tags: [testkube, k8s-stack]
 

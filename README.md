@@ -35,12 +35,13 @@ This repository contains the end-to-end reference architectures, deployment mani
 │   └── cleanup.sh                       # Teardown script for AWS SAM stacks & MicroVMs
 │
 ├── k8s-agent-sandbox/                   # Kubernetes Agent Sandbox (mogenius + Google gVisor)
-│   ├── ansible/                         # Declarative ansible-core automation stack (zero pip/galaxy deps)
-│   │   ├── ansible.cfg                  # Sandboxed /tmp execution config (local_tmp/remote_tmp)
+│   ├── ansible/                         # Declarative Ansible automation stack (ansible-core + ansible.posix & community.general)
+│   │   ├── ansible.cfg                  # Sandboxed /tmp execution & collection paths config
+│   │   ├── requirements.yml             # Official ansible.posix (>=1.5.4) & community.general (>=7.0.0) collections
 │   │   ├── inventory.ini                # Localhost & remote VM inventory
-│   │   ├── group_vars/all.yml           # Cluster sizing, chart versions & sysctl params
-│   │   ├── playbooks/site.yml           # Unified multi-stage playbook
-│   │   └── tasks/                       # Modular tasks: 00_host_prep, 01_minikube_gvisor, 02_k8s_stack
+│   │   ├── group_vars/all.yml           # Cluster sizing, chart versions, sysctl & Linux hardening params
+│   │   ├── playbooks/site.yml           # Unified multi-stage playbook with handlers & Sync Gate 2
+│   │   └── tasks/                       # Modular tasks: preflight assertions, Darwin/Ubuntu/Rocky/Linux-net, Minikube/containerd 2.x, K8s stack
 │   ├── scripts/
 │   │   ├── bootstrap_cluster.sh         # Thin CLI wrapper delegating to ansible-core (--dry-run vs --preflight-only)
 │   │   └── test_multios_bootstrap.sh    # Multi-OS & multi-arch integration test suite (sources reconciler)
@@ -114,7 +115,7 @@ Running a production-grade 2-node Kubernetes cluster locally (`minikube` control
 * **CPU Architectures:** Both **`aarch64` (ARM64)** and **`x86_64` (AMD64)** are fully supported with multi-architecture OCI manifests and dynamic gVisor (`runsc`) package resolution.
 * **Detailed Setup:** For operating system and architecture-specific installation instructions, see the **[Multi-OS & Multi-Architecture Setup Guide](docs/MULTI_OS_SETUP_GUIDE.md)**.
 
-**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, `helm`, and `ansible-core` (built-in system Python 3, zero external `pip` packages or Galaxy collections required). The `ansible-core` and `testkube` CLIs are automatically verified and installed by `bootstrap_cluster.sh` via native package managers (`brew`, `apt`, `dnf`) if missing.
+**Required host tooling:** Docker (Docker Desktop on macOS/Windows, or native Docker Engine CE on Linux), `minikube`, `kubectl`, `helm`, and `ansible-core` (plus official `ansible.posix` and `community.general` collections declared in [`requirements.yml`](k8s-agent-sandbox/ansible/requirements.yml)). Missing CLI tools, Docker Engine, and Ansible collections are automatically verified and installed by `bootstrap_cluster.sh` via native OS package managers (`brew`, `apt`, `dnf`) and `ansible-galaxy`.
 
 > [!IMPORTANT]
 > **Resource Sizing (macOS Docker Desktop / Linux / Windows WSL 2):**
@@ -160,7 +161,7 @@ To eliminate typing long nested script paths or memorizing CLI flags, the root [
 
 | Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile | Privilege (`sudo` / `BECOME`) Required |
 | :--- | :--- | :--- | :--- | :--- |
-| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 143 unit, live HTTP runtime, POSIX `/bin/sh` & Jinja2 tests | ❌ No |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 150 unit, live HTTP/containerd runtime, POSIX `/bin/sh` & security tests | ❌ No |
 | **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit | ❌ No |
 | **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
 | **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |
@@ -260,7 +261,7 @@ done
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
 1. **Audit or Provision the Full 2-Node Cluster via `make` (Ansible Reconciler):**
-   - **Fast Verification Suite:** Run `make check` to execute all 143 unit, syntax, live HTTP runtime (`egress-broker` + `threat_probe.py` & `sandbox-latency-exporter`), POSIX `/bin/sh -e`, and Jinja2 template rendering tests (~15s, zero VM spin-up).
+   - **Fast Verification Suite:** Run `make check` to execute all 150 unit, syntax, live HTTP/containerd runtime (`egress-broker` + `threat_probe.py`, `sandbox-latency-exporter`, and containerd 1.x/2.x drop-in), POSIX `/bin/sh -e`, Ansible security/structural scan, and Jinja2 template rendering tests (~15s, zero VM spin-up).
    - **Read-Only Dry Run (Zero Changes):** Run `make dry-run` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run`) to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
    - **Host Toolchain Discovery:** Run `make preflight` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only`) to ensure required host binaries are present and exit before cluster changes.
    - **Full Cluster Reconciliation:** Run `make cluster` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`), which delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml`, dynamically captures `minikube ip`, renders the Testkube workflow templates, and verifies all 11 service endpoints.

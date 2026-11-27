@@ -43,11 +43,20 @@ jobs:
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
-      - name: Install Test Utilities (Ruby / PyYAML / Ansible)
+      - name: Install Test Utilities (Ruby / PyYAML / Ansible & Collections)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ruby python3-yaml ansible-core || sudo apt-get install -y -qq ansible
+          sudo mkdir -p /usr/share/ansible/collections
+          ANS_VER=$(ansible --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+          ANS_MIN=${ANS_VER#*.}
+          if [ "${ANS_MIN:-16}" -lt 19 ]; then
+            sudo ansible-galaxy collection install "ansible.posix:>=2.0.0" "community.general:>=7.0.0,<12.0.0" -p /usr/share/ansible/collections
+          else
+            sudo ansible-galaxy collection install -r k8s-agent-sandbox/ansible/requirements.yml -p /usr/share/ansible/collections
+          fi
+          sudo chmod -R a+rX /usr/share/ansible/collections
 
       - name: Validate Shell Script Syntax (bash -n)
         run: |
@@ -100,6 +109,20 @@ jobs:
 
       - name: Checkout Codebase
         uses: actions/checkout@v4
+
+      - name: Install Ansible Collections on RHEL (ansible.posix, community.general)
+        run: |
+          mkdir -p /usr/share/ansible/collections
+          ANS_VER=$(ansible --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+          ANS_MIN=${ANS_VER#*.}
+          if [ "${ANS_MIN:-14}" -lt 16 ]; then
+            ansible-galaxy collection install "ansible.posix:>=1.5.4,<2.0.0" "community.general:>=7.0.0,<10.0.0" -p /usr/share/ansible/collections
+          elif [ "${ANS_MIN:-14}" -lt 19 ]; then
+            ansible-galaxy collection install "ansible.posix:>=2.0.0" "community.general:>=7.0.0,<12.0.0" -p /usr/share/ansible/collections
+          else
+            ansible-galaxy collection install -r k8s-agent-sandbox/ansible/requirements.yml -p /usr/share/ansible/collections
+          fi
+          chmod -R a+rX /usr/share/ansible/collections
 
       - name: Validate Shell Script Syntax (bash -n)
         run: |
@@ -158,6 +181,12 @@ jobs:
 
       - name: Checkout Codebase
         uses: actions/checkout@v4
+
+      - name: Install Ansible Collections on Debian 13 (ansible.posix, community.general)
+        run: |
+          mkdir -p /usr/share/ansible/collections
+          ansible-galaxy collection install -r k8s-agent-sandbox/ansible/requirements.yml -p /usr/share/ansible/collections
+          chmod -R a+rX /usr/share/ansible/collections
 
       - name: Verify Non-Root Debian Sudo Mode Detection & Dry-Run Audit (tty_tickets active)
         run: |

@@ -1,11 +1,56 @@
 ---
 - name: Provision & Reconcile Multi-OS 2-Node Kubernetes Agent Sandbox Platform (gVisor + mogenius + Testkube)
-  hosts: all
+  hosts: "{{ target_hosts | default('local') }}"
+  become: false
+  become_method: sudo
   gather_facts: true
+  handlers:
+    - name: Reload systemd daemon
+      listen: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: "{{ ansible_facts['user_id'] != 'root' }}"
+      failed_when: false
+
+    - name: Re-exec systemd manager
+      listen: Re-exec systemd manager
+      ansible.builtin.command: systemctl daemon-reexec
+      become: "{{ ansible_facts['user_id'] != 'root' }}"
+      changed_when: true
+      failed_when: false
+
+    - name: Restart systemd-networkd
+      listen: Restart systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+      become: "{{ ansible_facts['user_id'] != 'root' }}"
+      failed_when: false
+
+    - name: Reload NetworkManager
+      listen: Reload NetworkManager
+      ansible.builtin.systemd:
+        name: NetworkManager
+        state: reloaded
+      become: "{{ ansible_facts['user_id'] != 'root' }}"
+      failed_when: false
+
   tasks:
     - name: "[Stage 0] Host OS, Kernel Sysctl & Toolchain Preparation"
       ansible.builtin.import_tasks: ../tasks/00_host_prep.yml
       tags: [preflight, host-prep]
+
+    - name: "[Sync Gate 2] Flush all Stage 0 handlers before entering Minikube/containerd"
+      ansible.builtin.meta: flush_handlers
+      tags: [always, preflight, minikube, gvisor]
+
+    - name: "[Sync Gate 2] Refresh live host facts after Stage 0 host & network preparation"
+      ansible.builtin.setup:
+      when:
+        - ansible_facts['system'] == 'Linux'
+        - not (dry_run_mode | bool)
+        - not (preflight_only_mode | default(false) | bool)
+      tags: [minikube, gvisor]
 
     - name: "[Stages 1-3] Minikube Multi-Node Topology, Memory Clamping & gVisor Runtime"
       ansible.builtin.import_tasks: ../tasks/01_minikube_gvisor.yml

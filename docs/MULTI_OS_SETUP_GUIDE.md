@@ -75,12 +75,17 @@ Different Linux distributions enforce different `sudo` session and prompt behavi
 * **Ubuntu 25.10+ (`sudo-rs` vs. `/usr/bin/sudo.ws`):** Ubuntu 25.10 migrated `/usr/bin/sudo` to Rust `sudo-rs`, which wraps custom `-p` prompts in `[sudo: ...] Password:` and breaks Ansible's prompt matching. Stage 0 (`k8s-agent-sandbox/ansible/tasks/00_host_prep.yml`) natively checks `/usr/bin/sudo.ws` via `ansible.builtin.stat` and sets `ansible_become_exe: /usr/bin/sudo.ws` when present.
 * **Rocky Linux 9/10 & RHEL (`PKG_MGR == "dnf"`):** `detect_sudo_mode()` checks `sudo -n true`; if a ticket is already cached, Ansible proceeds without prompting, otherwise `--ask-become-pass` is appended.
 
-### 5. Linux Kernel Tweaks (`configure_linux_sysctl` & `--configure-host-sysctl`)
-Kubernetes multi-node clusters, containerd, Prometheus TSDB, and Testkube concurrency quickly exhaust default Linux inotify and open file descriptor limits (`fs.inotify.max_user_instances=128`):
-* **In-Node Minikube Tuning (Automatic, Zero Host Root):** Stage 1 (`01_minikube_gvisor.yml`) automatically tunes `fs.inotify.max_user_watches=1048576`, `fs.inotify.max_user_instances=8192`, `fs.file-max=2097152`, and `vm.max_map_count=262144` inside every Minikube node container.
-* **Host Kernel Audit (`00_host_prep_{ubuntu,rocky}.yml`):** In `group_vars/all.yml`, `configure_linux_sysctl: true` is defined as the declarative Ansible default, while `bootstrap_cluster.sh` passes `-e configure_linux_sysctl=false` unless `--configure-host-sysctl` is explicitly requested on the CLI:
+### 5. Linux Kernel Tweaks, Cross-OS Network Guards & Optional Hardening Controls
+Stage 0 (`00_host_prep_preflight_assert.yml` and `00_host_prep_linux_network.yml`) enforces read-only host compliance checks (`Python >= 3.9`, `RAM >= 2 GB`, `CPUs >= 2`, `kernel >= 5.2`, `glibc`) on every run, while keeping invasive host OS mutations safe for developer laptops unless explicitly enabled:
+* **In-Node Minikube Tuning (Automatic, Zero Host Root):** Stage 1 (`01_minikube_gvisor.yml`) automatically tunes `fs.inotify.max_user_watches=1048576`, `fs.inotify.max_user_instances=8192`, `fs.file-max=2097152`, `vm.max_map_count=262144`, `net.bridge.bridge-nf-call-iptables=1`, and `rp_filter=2` inside every Minikube node, and renders a version-aware `/etc/containerd/conf.d/10-gvisor-runsc.toml` drop-in supporting both **containerd 1.x (config v2)** and **containerd 2.x (config v3)** with explicit `SystemdCgroup = true`.
+* **Host Kernel, Module & Network Daemon Hardening (`--configure-host-sysctl`):** `bootstrap_cluster.sh` passes `-e configure_linux_sysctl=false` by default unless `--configure-host-sysctl` is specified. When enabled, Ansible loads/persists `overlay` & `br_netfilter` via `community.general.modprobe` (`persistent: present`), applies `/etc/sysctl.d/99-kubernetes-cri.conf` via `ansible.posix.sysctl` (with uniform `k8s_rp_filter_mode: "2"` across `all`, `default`, and active interfaces), protects `systemd-networkd` (`ManageForeignRoutes=no`) and `NetworkManager` (`unmanaged-devices`), disables `nm-cloud-setup`, and scopes `ansible.posix.selinux` strictly to RedHat-family hosts.
   ```bash
+  # Explicitly enable host-level kernel, module & network daemon hardening
   ./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --configure-host-sysctl
+
+  # Optional Ansible extra-vars for dedicated Kubernetes VMs:
+  # -e k8s_firewall_mode=configure   (or 'disable' on RHEL/Rocky 10+)
+  # -e k8s_disable_swap=true         (swapoff -a + /etc/fstab + systemd-zram-generator neutralization)
   ```
 
 ### 6. Explicit Ansible Privilege Escalation (`-K` / `--ask-become-pass`)
@@ -99,7 +104,7 @@ To avoid having to type long nested script paths or memorize CLI flags, the root
 
 | Goal / Stage | Make Target (Recommended) | Direct Script Command | Profile / Sizing | Privilege (`sudo` / `BECOME`) Required |
 | :--- | :--- | :--- | :--- | :--- |
-| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 143 unit, live HTTP runtime, POSIX `/bin/sh` & Jinja2 tests | ❌ No |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 150 unit, live HTTP/containerd runtime, POSIX `/bin/sh` & security tests | ❌ No |
 | **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, sizing audit | ❌ No |
 | **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
 | **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |

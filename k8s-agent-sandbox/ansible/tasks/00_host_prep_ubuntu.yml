@@ -21,7 +21,7 @@
 
 - name: "[0/8 Ubuntu] Install base utilities via apt"
   ansible.builtin.apt:
-    name: [curl, tar, jq, bzip2, procps, openssl, ca-certificates]
+    name: [curl, tar, jq, bzip2, procps, openssl, ca-certificates, conntrack, iproute2, socat]
     state: present
     update_cache: yes
   become: "{{ ansible_facts['user_id'] != 'root' }}"
@@ -131,23 +131,32 @@
   ignore_errors: true
   ignore_unreachable: true
   failed_when: false
+  notify: Re-exec systemd manager
   when:
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep, sysctl, nofile]
 
-- name: "[0/8 Ubuntu] Reload kernel sysctl and re-exec systemd daemon"
-  ansible.builtin.shell: |
-    sysctl -p /etc/sysctl.d/99-kubernetes-sandbox.conf >/dev/null 2>&1 || true
-    systemctl daemon-reexec >/dev/null 2>&1 || true
-  args:
-    executable: /bin/bash
+- name: "[0/8 Ubuntu] Reload kernel sysctl via ansible.posix.sysctl drop-in"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-sandbox.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop:
+    - { key: "fs.file-max", value: "{{ nofile_controls.linux.fs_file_max }}" }
+    - { key: "fs.nr_open", value: "{{ nofile_controls.linux.fs_nr_open }}" }
+    - { key: "fs.inotify.max_user_watches", value: "{{ k8s_sysctl_params['fs.inotify.max_user_watches'] }}" }
+    - { key: "fs.inotify.max_user_instances", value: "{{ k8s_sysctl_params['fs.inotify.max_user_instances'] }}" }
+    - { key: "vm.max_map_count", value: "{{ k8s_sysctl_params['vm.max_map_count'] }}" }
+    - { key: "net.ipv4.ip_forward", value: "{{ k8s_sysctl_params['net.ipv4.ip_forward'] }}" }
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
   ignore_unreachable: true
   failed_when: false
-  changed_when: true
   when:
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
@@ -264,15 +273,13 @@
   tags: [preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Install Docker CE via apt if missing"
-  ansible.builtin.shell: |
-    set -e
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq docker.io containerd 2>/dev/null || apt-get install -y -qq docker.io || apt-get install -y -qq docker-ce docker-ce-cli containerd.io
-  args:
-    executable: /bin/bash
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - containerd
+    state: present
+    update_cache: true
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  changed_when: true
   when:
     - "'MISSING:docker' in cli_audit_ubuntu.stdout"
     - not (dry_run_mode | bool)

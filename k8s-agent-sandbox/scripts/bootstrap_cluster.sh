@@ -107,6 +107,25 @@ ensure_ansible() {
     else echo -e "${RED}✗ Please install ansible-core (ansible-playbook).${NC}" >&2; exit 1; fi
 }
 
+ensure_ansible_collections() {
+    command -v ansible-galaxy >/dev/null 2>&1 || return 0
+    if ansible-doc -t module ansible.posix.sysctl >/dev/null 2>&1 && \
+       ansible-doc -t module community.general.modprobe >/dev/null 2>&1; then
+        return 0
+    fi
+    echo -e "  ${CYAN}[>]${NC} Installing required Ansible collections (ansible.posix, community.general)..."
+    local ans_ver ans_maj ans_min
+    ans_ver="$(ansible --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || echo "2.16")"
+    IFS='.' read -r ans_maj ans_min <<< "$ans_ver"
+    if [ "${ans_maj:-2}" -lt 2 ] || { [ "${ans_maj:-2}" -eq 2 ] && [ "${ans_min:-16}" -lt 16 ]; }; then
+        ansible-galaxy collection install "ansible.posix:>=1.5.4,<2.0.0" "community.general:>=7.0.0,<10.0.0" >/dev/null
+    elif [ "${ans_maj:-2}" -eq 2 ] && [ "${ans_min:-16}" -lt 19 ]; then
+        ansible-galaxy collection install "ansible.posix:>=2.0.0" "community.general:>=7.0.0,<12.0.0" >/dev/null
+    else
+        ansible-galaxy collection install -r "${ANSIBLE_DIR}/requirements.yml" >/dev/null
+    fi
+}
+
 host_needs_privilege() {
     [ "${CONFIGURE_HOST_SYSCTL:-false}" = true ] && return 0
     if [ "${HOST_PLATFORM:-}" == "Linux" ]; then
@@ -182,6 +201,7 @@ main() {
     fi
 
     ensure_ansible
+    ensure_ansible_collections
     detect_sudo_mode
     build_ansible_args
 
