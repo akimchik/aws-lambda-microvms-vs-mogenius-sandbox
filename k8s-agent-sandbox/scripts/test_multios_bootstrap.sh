@@ -48,13 +48,17 @@ echo -e "${BLUE}============================================================${NC
 echo -e "${BLUE}Multi-OS & Multi-Architecture Bootstrap Integration Test Suite${NC}"
 echo -e "${BLUE}============================================================${NC}"
 
-# Source the bootstrap script functions (ensuring source guard works)
+# Source the bootstrap script functions (saving and restoring SCRIPT_DIR / K8S_DIR so BASH_SOURCE inside bootstrap_cluster.sh stays isolated)
 if [ ! -f "$BOOTSTRAP_SCRIPT" ]; then
     echo -e "${RED}✗ Error: Bootstrap script not found at ${BOOTSTRAP_SCRIPT}${NC}"
     exit 1
 fi
+_SAVED_SCRIPT_DIR="$SCRIPT_DIR"
+_SAVED_K8S_DIR="$K8S_DIR"
 # shellcheck source=k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 source "$BOOTSTRAP_SCRIPT"
+SCRIPT_DIR="$_SAVED_SCRIPT_DIR"
+K8S_DIR="$_SAVED_K8S_DIR"
 
 MOCK_TMP_DIR=$(mktemp -d)
 cleanup_test_env() {
@@ -361,9 +365,10 @@ EOF
 ) && assert_test "detect_sudo_mode(): Detects sudo requires password on Linux non-root" 0 || \
    assert_test "detect_sudo_mode(): Detects sudo requires password on Linux non-root" 1
 
-# Test detect_sudo_mode(): Linux non-root with passwordless sudo -> SUDO_NEEDS_PASS=false
+# Test detect_sudo_mode(): Rocky/RHEL (dnf) non-root with cached/passwordless sudo -> SUDO_NEEDS_PASS=false
 (
     HOST_PLATFORM="Linux"
+    PKG_MGR="dnf"
     MOCK_UID=1000
     FORCE_ASK_BECOME=false
     MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_ok"
@@ -376,8 +381,21 @@ EOF
     PATH="${MOCK_SUDO_DIR}:${PATH}"
     detect_sudo_mode
     [ "$SUDO_NEEDS_PASS" = false ]
-) && assert_test "detect_sudo_mode(): Detects passwordless sudo on Linux non-root" 0 || \
-   assert_test "detect_sudo_mode(): Detects passwordless sudo on Linux non-root" 1
+) && assert_test "detect_sudo_mode(): Rocky/RHEL (dnf) uses cached sudo ticket (SUDO_NEEDS_PASS=false)" 0 || \
+   assert_test "detect_sudo_mode(): Rocky/RHEL (dnf) uses cached sudo ticket (SUDO_NEEDS_PASS=false)" 1
+
+# Test detect_sudo_mode(): Debian/Ubuntu (apt) non-root skips sudo ticket check -> SUDO_NEEDS_PASS=true
+(
+    HOST_PLATFORM="Linux"
+    PKG_MGR="apt"
+    MOCK_UID=1000
+    FORCE_ASK_BECOME=false
+    MOCK_SUDO_DIR="${MOCK_TMP_DIR}/mock_sudo_ok"
+    PATH="${MOCK_SUDO_DIR}:${PATH}"
+    detect_sudo_mode
+    [ "$SUDO_NEEDS_PASS" = true ]
+) && assert_test "detect_sudo_mode(): Debian/Ubuntu (apt) skips sudo ticket check (SUDO_NEEDS_PASS=true)" 0 || \
+   assert_test "detect_sudo_mode(): Debian/Ubuntu (apt) skips sudo ticket check (SUDO_NEEDS_PASS=true)" 1
 
 # Test detect_sudo_mode(): Never sets SUDO_NEEDS_PASS on macOS
 (
@@ -498,80 +516,82 @@ else
 fi
 
 # ==============================================================================
-# [3/6] Real `compute_cluster_sizing` & Memory Auto-Clamping Tests
+# [3/6] Real Ansible Sizing Expression & Playbook Pipeline Tests
 # ==============================================================================
-echo -e "\n${YELLOW}[3/6] Testing Sizing Logic & Memory Auto-Clamping...${NC}"
+echo -e "\n${YELLOW}[3/6] Testing Real Ansible Sizing Expression & Single-Pass Pipeline...${NC}"
 
-# Create mock docker binary
-cat << 'EOF' > "${MOCK_BIN}/docker"
-#!/bin/sh
-if [ "$1" = "info" ]; then
-    echo "${MOCK_DOCKER_BYTES:-8834019328}"
+# Resolve Python interpreter used by ansible-playbook (portable across macOS, Debian, Ubuntu, and Rocky Linux)
+export K8S_DIR
+RUNTIME_TEST_PY=""
+ANSIBLE_PY=$(head -n1 "$(command -v ansible-playbook 2>/dev/null || echo /nonexistent)" 2>/dev/null | sed 's/^#!//' | awk '{print $1}' || true)
+for candidate_py in "$ANSIBLE_PY" "$PY_BIN" $(which python3 python 2>/dev/null); do
+    if [ -n "$candidate_py" ] && [ -x "$candidate_py" ] && "$candidate_py" -c "import yaml, jinja2" >/dev/null 2>&1; then
+        RUNTIME_TEST_PY="$candidate_py"
+        break
+    fi
+done
+
+# Real Runtime Execution Test: Execute actual Ansible Jinja2 sizing formula with RUNTIME_TEST_PY
+if [ -n "$RUNTIME_TEST_PY" ]; then
+    "$RUNTIME_TEST_PY" -c '
+import yaml, jinja2, os
+k8s_dir = os.environ["K8S_DIR"]
+env = jinja2.Environment()
+env.filters["bool"] = lambda v: str(v).lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)
+tasks = yaml.safe_load(open(os.path.join(k8s_dir, "ansible/tasks/01_minikube_gvisor.yml")))
+sizing_task = [t for t in tasks if "Determine final Minikube primary node CPUs and Memory" in t.get("name", "")][0]
+cpu_tpl = env.from_string(sizing_task["ansible.builtin.set_fact"]["effective_cpus"])
+mem_tpl = env.from_string(sizing_task["ansible.builtin.set_fact"]["effective_memory_mb"])
+
+assert int(cpu_tpl.render(minikube_ci_mode=False, minikube_cpus=4).strip()) == 4
+assert int(mem_tpl.render(minikube_custom_memory_mb="", minikube_ci_mode=False, detected_mem_mb=8424, minikube_memory_mb=8192).strip()) == 8192
+assert int(mem_tpl.render(minikube_custom_memory_mb="", minikube_ci_mode=False, detected_mem_mb=7957, minikube_memory_mb=8192).strip()) == 6144
+assert int(cpu_tpl.render(minikube_ci_mode=True, minikube_cpus=4).strip()) == 2
+assert int(mem_tpl.render(minikube_custom_memory_mb="", minikube_ci_mode=True, detected_mem_mb=16000, minikube_memory_mb=8192).strip()) == 4096
+assert int(mem_tpl.render(minikube_custom_memory_mb="7168", minikube_ci_mode=False, detected_mem_mb=16000, minikube_memory_mb=8192).strip()) == 7168
+' >/dev/null 2>&1 && \
+    assert_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): Executes real Ansible sizing formula (8192 default, 6144 clamp, 4096 CI, custom override)" 0 || \
+    assert_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): Executes real Ansible sizing formula (8192 default, 6144 clamp, 4096 CI, custom override)" 1
+else
+    grep -q "effective_memory_mb:" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
+    assert_test "tasks/01_minikube_gvisor.yml: Ansible sizing task defined" 0 || \
+    assert_test "tasks/01_minikube_gvisor.yml: Ansible sizing task defined" 1
 fi
-EOF
-chmod +x "${MOCK_BIN}/docker"
 
-# Test 1: Sufficient memory (8424 MB Docker VM) -> Default 8192 MB
-(
-    export PATH="${MOCK_BIN}:${PATH}"
-    export MOCK_DOCKER_BYTES="8834019328" # ~8424 MB
-    CI_MODE=false
-    CUSTOM_MEM=""
-    compute_cluster_sizing
-    [ "$CLUSTER_MEM" -eq 8192 ] && [ "$CLUSTER_CPUS" -eq 4 ]
-) && assert_test "compute_cluster_sizing(): Allocates 8192 MB when Docker memory >= 8192 MB" 0 || \
-   assert_test "compute_cluster_sizing(): Allocates 8192 MB when Docker memory >= 8192 MB" 1
+# Verify bootstrap_cluster.sh has zero dead bash functions (install_host_bin, compute_cluster_sizing, reconcile_runsc_toml, prime_sudo, start_sudo_keepalive, audit_and_tune_linux_inotify removed)
+if ! grep -qE "install_host_bin|compute_cluster_sizing|reconcile_runsc_toml|prime_sudo|start_sudo_keepalive|audit_and_tune_linux_inotify" "${BOOTSTRAP_SCRIPT}"; then
+    assert_test "bootstrap_cluster.sh: Zero dead bash functions (sizing, TOML, sysctl & sudo priming delegated 100% to Ansible)" 0
+else
+    assert_test "bootstrap_cluster.sh: Dead bash functions still present" 1
+fi
 
-# Test 2: Constrained memory (7957 MB Docker VM, e.g. 8GB VM) -> Clamped to safe value (6144 MB)
-(
-    export PATH="${MOCK_BIN}:${PATH}"
-    export MOCK_DOCKER_BYTES="8343519232" # ~7957 MB
-    CI_MODE=false
-    CUSTOM_MEM=""
-    compute_cluster_sizing >/dev/null 2>&1
-    [ "$CLUSTER_MEM" -eq 6144 ] && [ "$CLUSTER_CPUS" -eq 4 ]
-) && assert_test "compute_cluster_sizing(): Auto-clamps to 6144 MB on 7957 MB Docker ceiling" 0 || \
-   assert_test "compute_cluster_sizing(): Auto-clamps to 6144 MB on 7957 MB Docker ceiling" 1
-
-# Test 3: CI mode -> 4096 MB / 2 CPUs
-(
-    export PATH="${MOCK_BIN}:${PATH}"
-    CI_MODE=true
-    CUSTOM_MEM=""
-    compute_cluster_sizing >/dev/null
-    [ "$CLUSTER_MEM" -eq 4096 ] && [ "$CLUSTER_CPUS" -eq 2 ]
-) && assert_test "compute_cluster_sizing(): Sizing respects CI_MODE (4096 MB, 2 CPUs)" 0 || \
-   assert_test "compute_cluster_sizing(): Sizing respects CI_MODE (4096 MB, 2 CPUs)" 1
-
-# Test 4: Custom memory flag -> Overrides auto-detection
-(
-    export PATH="${MOCK_BIN}:${PATH}"
-    CI_MODE=false
-    CUSTOM_MEM="7168"
-    compute_cluster_sizing >/dev/null
-    [ "$CLUSTER_MEM" -eq 7168 ]
-) && assert_test "compute_cluster_sizing(): Sizing respects custom memory flag (7168 MB)" 0 || \
-   assert_test "compute_cluster_sizing(): Sizing respects custom memory flag (7168 MB)" 1
+# Verify bootstrap_cluster.sh runs a single-pass ansible-playbook pipeline and passes preflight_only_mode=\${PREFLIGHT_ONLY}
+if grep -q 'preflight_only_mode=\${PREFLIGHT_ONLY}' "${BOOTSTRAP_SCRIPT}" && \
+   ! grep -q -- '--skip-tags preflight' "${BOOTSTRAP_SCRIPT}" && \
+   ! grep -q 'exec sg docker' "${BOOTSTRAP_SCRIPT}"; then
+    assert_test "bootstrap_cluster.sh: Single-pass Ansible execution (no 2-pass --skip-tags preflight split or exec sg docker loop)" 0
+else
+    assert_test "bootstrap_cluster.sh: Single-pass Ansible execution check failed" 1
+fi
 
 # ==============================================================================
-# [4/6] Real `reconcile_runsc_toml` & `install_host_bin` Regression Tests
+# [4/6] Real Ansible Embedded Task & Live Component Runtime Tests
 # ==============================================================================
-echo -e "\n${YELLOW}[4/6] Testing Containerd TOML Deduplication & Binary Installer...${NC}"
+echo -e "\n${YELLOW}[4/6] Testing Real Ansible Embedded Task Logic & Live Component Servers...${NC}"
 
-# Test reconcile_runsc_toml() on config without runsc stanza -> Appends stanza
+# Execute the actual awk TOML deduplication script extracted directly from tasks/01_minikube_gvisor.yml
+TOML_AWK_SCRIPT=$(awk '/awk '\''/{flag=1; next} /'\'' "\$CONFIG_PATH"/{flag=0} flag' "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml")
 TEST_TOML_1="${MOCK_TMP_DIR}/test1.toml"
 cat << 'EOF' > "$TEST_TOML_1"
 [plugins."io.containerd.grpc.v1.cri"]
   sandbox_image = "registry.k8s.io/pause:3.9"
 EOF
+awk "$TOML_AWK_SCRIPT" "$TEST_TOML_1" > "${TEST_TOML_1}.out"
+STANZA_COUNT_1=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_1}.out" || true)
+[ "${STANZA_COUNT_1:-0}" -eq 1 ] && \
+  assert_test "tasks/01_minikube_gvisor.yml: Real awk script appends runsc stanza when missing" 0 || \
+  assert_test "tasks/01_minikube_gvisor.yml: Real awk script appends runsc stanza when missing" 1
 
-reconcile_runsc_toml "$TEST_TOML_1" > "${TEST_TOML_1}.out"
-STANZA_COUNT_1=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_1}.out" || echo 0)
-[ "$STANZA_COUNT_1" -eq 1 ] && \
-  assert_test "reconcile_runsc_toml(): Appends runsc stanza when missing" 0 || \
-  assert_test "reconcile_runsc_toml(): Appends runsc stanza when missing" 1
-
-# Test reconcile_runsc_toml() on config with duplicate runsc stanzas -> Deduplicates to exactly 1
 TEST_TOML_2="${MOCK_TMP_DIR}/test2.toml"
 cat << 'EOF' > "$TEST_TOML_2"
 [plugins."io.containerd.grpc.v1.cri"]
@@ -583,113 +603,163 @@ cat << 'EOF' > "$TEST_TOML_2"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
 EOF
+awk "$TOML_AWK_SCRIPT" "$TEST_TOML_2" > "${TEST_TOML_2}.out"
+STANZA_COUNT_2=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_2}.out" || true)
+[ "${STANZA_COUNT_2:-0}" -eq 1 ] && \
+  assert_test "tasks/01_minikube_gvisor.yml: Real awk script deduplicates multiple runsc stanzas to 1" 0 || \
+  assert_test "tasks/01_minikube_gvisor.yml: Real awk script deduplicates multiple runsc stanzas to 1" 1
 
-reconcile_runsc_toml "$TEST_TOML_2" > "${TEST_TOML_2}.out"
-STANZA_COUNT_2=$(grep -c "containerd.runtimes.runsc" "${TEST_TOML_2}.out" || echo 0)
-[ "$STANZA_COUNT_2" -eq 1 ] && \
-  assert_test "reconcile_runsc_toml(): Deduplicates multiple runsc stanzas to exactly 1" 0 || \
-  assert_test "reconcile_runsc_toml(): Deduplicates multiple runsc stanzas to exactly 1" 1
-
-# Regression Test: install_host_bin() must copy (not move) so multiple target installs succeed
-INSTALL_SRC="${MOCK_TMP_DIR}/mock_bin_src"
-INSTALL_DST1="${MOCK_TMP_DIR}/mock_bin_dst1"
-INSTALL_DST2="${MOCK_TMP_DIR}/mock_bin_dst2"
-echo "#!/bin/sh" > "$INSTALL_SRC"
-echo "echo mock_ok" >> "$INSTALL_SRC"
-chmod +x "$INSTALL_SRC"
-
-install_host_bin "$INSTALL_SRC" "$INSTALL_DST1"
-install_host_bin "$INSTALL_SRC" "$INSTALL_DST2"
-
-if [ -f "$INSTALL_SRC" ] && [ -x "$INSTALL_DST1" ] && [ -x "$INSTALL_DST2" ]; then
-    assert_test "install_host_bin(): Multi-path copy regression test (no double-mv crash)" 0
-else
-    assert_test "install_host_bin(): Multi-path copy regression test (no double-mv crash)" 1
-fi
-
-# Regression Test: prime_sudo() must safely detect cached/passwordless sudo or root
-(
-    if [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
-        prime_sudo
+# Verify zero unreachable/dead tasks across all 00_host_prep*.yml files (every task must carry 'preflight' tag)
+if [ -n "$RUNTIME_TEST_PY" ]; then
+    if "$RUNTIME_TEST_PY" -c '
+import yaml, glob, os
+k8s_dir = os.environ["K8S_DIR"]
+for f in sorted(glob.glob(os.path.join(k8s_dir, "ansible/tasks/00_host_prep*.yml"))):
+    for t in yaml.safe_load(open(f)):
+        tags = t.get("tags", [])
+        tname = t.get("name", "")
+        assert "preflight" in tags, f"Missing preflight tag in {f}: {tname}"
+' >/dev/null 2>&1; then
+        assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 0
+    else
+        assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 1
     fi
-) && assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 0 || \
-   assert_test "prime_sudo(): Executes safely under cached/passwordless sudo or root" 1
-
-# Regression Test: prime_sudo() skips sudo -v when FORCE_ASK_BECOME=true to avoid double password prompt and TTY masking
-(
-    HOST_PLATFORM="Linux"
-    FORCE_ASK_BECOME=true
-    MOCK_SUDO_V_DIR="${MOCK_TMP_DIR}/mock_sudo_v_fail"
-    mkdir -p "$MOCK_SUDO_V_DIR"
-    cat << 'EOF' > "${MOCK_SUDO_V_DIR}/sudo"
-#!/bin/sh
-if [ "$1" = "-v" ]; then
-    echo "ERROR: sudo -v should not have been called!" >&2
-    exit 99
+elif command -v ruby >/dev/null 2>&1; then
+    if ruby -ryaml -e '
+    Dir.glob(ARGV[0]).sort.each do |f|
+      YAML.load_file(f).each do |t|
+        tags = t["tags"] || []
+        exit 1 unless tags.include?("preflight")
+      end
+    end
+    ' "${K8S_DIR}/ansible/tasks/00_host_prep*.yml" 2>/dev/null; then
+        assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 0
+    else
+        assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 1
+    fi
 fi
-exit 1
-EOF
-    chmod +x "${MOCK_SUDO_V_DIR}/sudo"
-    PATH="${MOCK_SUDO_V_DIR}:${PATH}"
-    # prime_sudo should exit 0 without invoking sudo -v
-    prime_sudo
-) && assert_test "prime_sudo(): Skips sudo -v when FORCE_ASK_BECOME=true to avoid double password prompt" 0 || \
-   assert_test "prime_sudo(): Skips sudo -v when FORCE_ASK_BECOME=true to avoid double password prompt" 1
 
-# Regression Test: prime_sudo() skips sudo -v when host_needs_privilege evaluates to false
-(
-    HOST_PLATFORM="Linux"
-    FORCE_ASK_BECOME=false
-    # Mock host_needs_privilege to return 1 (false: no host tools missing)
-    host_needs_privilege() { return 1; }
-    MOCK_SUDO_V_DIR2="${MOCK_TMP_DIR}/mock_sudo_v_fail2"
-    mkdir -p "$MOCK_SUDO_V_DIR2"
-    cat << 'EOF' > "${MOCK_SUDO_V_DIR2}/sudo"
-#!/bin/sh
-if [ "$1" = "-v" ]; then
-    echo "ERROR: sudo -v should not have been called!" >&2
-    exit 99
+# Verify Stage 0 and Stage 1 explicitly enforce that current user can operate in docker group (no sudo -n docker info bypass)
+if ! grep -q "sudo -n docker info" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   ! grep -q "sudo -n docker info" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "Assert current user can operate as an active member of the docker group" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml"; then
+    assert_test "tasks/00_host_prep_*.yml & 01_minikube_gvisor.yml: Strictly enforces active docker group access (zero sudo -n docker info bypass)" 0
+else
+    assert_test "tasks/00_host_prep_*.yml & 01_minikube_gvisor.yml: Active docker group access enforcement missing" 1
 fi
-exit 1
-EOF
-    chmod +x "${MOCK_SUDO_V_DIR2}/sudo"
-    PATH="${MOCK_SUDO_V_DIR2}:${PATH}"
-    prime_sudo
-) && assert_test "prime_sudo(): Skips sudo -v when host_needs_privilege evaluates to false" 0 || \
-   assert_test "prime_sudo(): Skips sudo -v when host_needs_privilege evaluates to false" 1
 
-# Regression Test: prime_sudo() immediately exits on macOS
-(
-    HOST_PLATFORM="macOS"
-    SUDO_NEEDS_PASS=false
-    MOCK_SUDO_ERR_DIR="${MOCK_TMP_DIR}/mock_sudo_mac_err"
-    mkdir -p "$MOCK_SUDO_ERR_DIR"
-    cat << 'EOF' > "${MOCK_SUDO_ERR_DIR}/sudo"
-#!/bin/sh
-echo "ERROR: sudo called on macOS!" >&2
-exit 99
-EOF
-    chmod +x "${MOCK_SUDO_ERR_DIR}/sudo"
-    PATH="${MOCK_SUDO_ERR_DIR}:${PATH}"
-    prime_sudo
-) && assert_test "prime_sudo(): Exits immediately on macOS without invoking sudo" 0 || \
-   assert_test "prime_sudo(): Exits immediately on macOS without invoking sudo" 1
+# Real Runtime Execution Test: Extract broker.py from egress-broker.yaml and run in-process WSGI/handler test with threat_probe.py (Blocked 403 vs Drift EXTRA_ALLOWED_HOSTS 200)
+if [ -n "$RUNTIME_TEST_PY" ]; then
+    "$RUNTIME_TEST_PY" -c '
+import yaml, threading, urllib.request, socket, sys, os
+socket.getfqdn = lambda *a: "localhost"
+k8s_dir = os.environ["K8S_DIR"]
+sys.path.insert(0, os.path.join(k8s_dir, "threat-model"))
+import threat_probe
 
-# Regression Test: start_sudo_keepalive() exits immediately on macOS
-(
-    HOST_PLATFORM="macOS"
-    MOCK_UID=1000
-    start_sudo_keepalive
-) && assert_test "start_sudo_keepalive(): Exits immediately on macOS" 0 || \
-   assert_test "start_sudo_keepalive(): Exits immediately on macOS" 1
+docs = list(yaml.safe_load_all(open(os.path.join(k8s_dir, "threat-model/egress-broker.yaml"))))
+cm = [d for d in docs if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "egress-broker-code"][0]
+broker_code = cm["data"]["broker.py"]
 
-# Regression Test: start_sudo_keepalive() exits immediately as root
-(
-    HOST_PLATFORM="Linux"
-    MOCK_UID=0
-    start_sudo_keepalive
-) && assert_test "start_sudo_keepalive(): Exits immediately as root (UID 0)" 0 || \
-   assert_test "start_sudo_keepalive(): Exits immediately as root (UID 0)" 1
+def run_broker_test(extra_hosts=""):
+    os.environ["GITHUB_APP_INSTALLATION_TOKEN"] = "ghs_test_ephemeral_token"
+    os.environ["EXTRA_ALLOWED_HOSTS"] = extra_hosts
+    ns = {"__name__": "broker_test"}
+    exec(broker_code, ns)
+    srv = ns["HTTPServer"](("127.0.0.1", 0), ns["BrokerHandler"])
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        res = threat_probe.check_broker_egress(f"http://127.0.0.1:{port}")
+        t6b = [r for r in res if r["id"] == "T6B_BROKER_POLICY_ENFORCEMENT"][0]
+        t6c = [r for r in res if r["id"] == "T6C_OUT_OF_SANDBOX_AUTH"][0]
+        return t6b["status"], t6c["status"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+s_t6b, s_t6c = run_broker_test("")
+assert s_t6b == "PASS (BLOCKED_BY_BROKER)", f"Expected PASS (BLOCKED_BY_BROKER), got {s_t6b}"
+assert s_t6c == "PASS (BROKER_INJECTED)", f"Expected PASS (BROKER_INJECTED), got {s_t6c}"
+
+d_t6b, _ = run_broker_test("example.com")
+assert d_t6b == "FAIL (EXPOSED)", f"Expected FAIL (EXPOSED) on drift, got {d_t6b}"
+' >/dev/null 2>&1 && \
+    assert_test "Live E2E Runtime (egress-broker + threat_probe.py): Verifies HTTP 403 block (PASS) and EXTRA_ALLOWED_HOSTS drift detection (FAIL EXPOSED)" 0 || \
+    assert_test "Live E2E Runtime (egress-broker + threat_probe.py): Verifies HTTP 403 block (PASS) and EXTRA_ALLOWED_HOSTS drift detection (FAIL EXPOSED)" 1
+fi
+
+# Real Runtime Execution Test: Extract exporter.py from sandbox-latency-exporter.yaml and verify POST /record & GET /metrics for T6B drift (1 -> 0 -> 1)
+if [ -n "$RUNTIME_TEST_PY" ]; then
+    "$RUNTIME_TEST_PY" -c '
+import yaml, threading, urllib.request, socket, sys, os
+socket.getfqdn = lambda *a: "localhost"
+k8s_dir = os.environ["K8S_DIR"]
+
+docs = list(yaml.safe_load_all(open(os.path.join(k8s_dir, "monitoring/sandbox-latency-exporter.yaml"))))
+cm = [d for d in docs if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "sandbox-latency-exporter-code"][0]
+exp_code = cm["data"]["exporter.py"]
+
+ns = {"__name__": "exporter_test"}
+exec(exp_code, ns)
+srv = ns["HTTPServer"](("127.0.0.1", 0), ns["ExporterHandler"])
+port = srv.server_address[1]
+t = threading.Thread(target=srv.serve_forever, daemon=True)
+t.start()
+try:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/record?security_passed=5&T6B_BROKER_POLICY_ENFORCEMENT=0&latency_ms=1450&launch_type=cold&active_sandboxes=3", data=b"", method="POST")
+    urllib.request.urlopen(req, timeout=2)
+    metrics = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2).read().decode()
+    assert "agent_sandbox_security_vector_status{vector=\"T6B_BROKER_POLICY_ENFORCEMENT\"} 0" in metrics, "T6B=0 missing in /metrics"
+    assert "agent_sandbox_security_checks_passed 5" in metrics, "security_checks_passed 5 missing"
+    assert "agent_sandbox_active_test_sandboxes 3" in metrics, "active_sandboxes 3 missing"
+    assert "agent_sandbox_claim_controller_startup_latency_ms_count{launch_type=\"cold\"} 1" in metrics, "cold count 1 missing"
+finally:
+    srv.shutdown()
+    srv.server_close()
+' >/dev/null 2>&1 && \
+    assert_test "Live E2E Runtime (sandbox-latency-exporter): Verifies POST /record & GET /metrics for T6B=0 drift, cold latency, and active_sandboxes=3" 0 || \
+    assert_test "Live E2E Runtime (sandbox-latency-exporter): Verifies POST /record & GET /metrics for T6B=0 drift, cold latency, and active_sandboxes=3" 1
+fi
+
+# Real POSIX /bin/sh Execution Test: Execute rendered TestWorkflow shell steps under /bin/sh -e (catches sh: 0: bad number)
+if [ -n "$RUNTIME_TEST_PY" ]; then
+    "$RUNTIME_TEST_PY" -c '
+import jinja2, yaml, subprocess, tempfile, os
+k8s_dir = os.environ["K8S_DIR"]
+
+mock_bin = tempfile.mkdtemp()
+kubectl_path = os.path.join(mock_bin, "kubectl")
+with open(kubectl_path, "w") as f:
+    f.write("#!/bin/sh\nif echo \"$*\" | grep -q \"sandboxwarmpool\"; then echo \"app=sandbox\"; elif echo \"$*\" | grep -q \"sandbox.name\"; then echo \"default-pod-1\"; elif echo \"$*\" | grep -q \"image\"; then echo \"sandbox:1.2.1\"; elif echo \"$*\" | grep -q \"exec\"; then echo \"version=v2.1.0 | cpu.max=200000 100000 | memory.max=2147483648\"; fi\nexit 0\n")
+os.chmod(kubectl_path, 0o755)
+wget_path = os.path.join(mock_bin, "wget")
+with open(wget_path, "w") as f:
+    f.write("#!/bin/sh\nexit 0\n")
+os.chmod(wget_path, 0o755)
+
+env = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.join(k8s_dir, "testkube/templates")))
+doc = yaml.safe_load(env.get_template("test-workflow.yaml.j2").render(minikube_ip="127.0.0.1"))
+shell_script = doc["spec"]["steps"][0]["run"]["shell"]
+data_dir = tempfile.mkdtemp()
+shell_script = shell_script.replace("/data/sandbox_ids.txt", os.path.join(data_dir, "sandbox_ids.txt"))
+shell_script = shell_script.replace("/proc/uptime", os.devnull)
+
+run_env = os.environ.copy()
+run_env["PATH"] = f"{mock_bin}:" + run_env.get("PATH", "")
+run_env["SANDBOX_COUNT"] = "2"
+run_env["CODE_VERSION"] = "v2.1.0-fresh"
+run_env["FORCE_FRESH"] = "true"
+
+res = subprocess.run(["/bin/sh", "-e", "-c", shell_script], env=run_env, capture_output=True, text=True)
+assert res.returncode == 0, f"POSIX /bin/sh failed: {res.stderr}"
+assert "bad number" not in res.stderr, f"bad number error in stderr: {res.stderr}"
+assert "default-pod-1,default-pod-1" in open(os.path.join(data_dir, "sandbox_ids.txt")).read()
+' >/dev/null 2>&1 && \
+    assert_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): Executes under /bin/sh -e with zero 'bad number' errors" 0 || \
+    assert_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): Executes under /bin/sh -e with zero 'bad number' errors" 1
+fi
 
 # Regression Test: Host-side gVisor archive extraction (tar -xjf / Python tarfile)
 (
@@ -743,13 +813,15 @@ else
     assert_test "tasks/00_host_prep_{ubuntu,rocky}.yml: audits openssl and implements VERIFY_CHECKSUM fallback for Helm installer" 1
 fi
 
-# Regression Test: tasks/00_host_prep_darwin.yml dynamically resolves Homebrew prefix (arm64 /opt/homebrew vs x86_64 /usr/local)
+# Regression Test: tasks/00_host_prep_darwin.yml dynamically resolves Homebrew prefix (HOMEBREW_PREFIX / arm64 /opt/homebrew vs x86_64 /usr/local)
 if grep -q "brew_prefix:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   grep -q "HOMEBREW_PREFIX" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
    grep -q "/opt/homebrew" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
+   grep -q "/usr/local" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml" && \
    ! grep -q "become:" "${K8S_DIR}/ansible/tasks/00_host_prep_darwin.yml"; then
-    assert_test "tasks/00_host_prep_darwin.yml: resolves architecture-specific Homebrew prefix without sudo" 0
+    assert_test "tasks/00_host_prep_darwin.yml: resolves HOMEBREW_PREFIX and architecture-specific prefix without sudo" 0
 else
-    assert_test "tasks/00_host_prep_darwin.yml: resolves architecture-specific Homebrew prefix without sudo" 1
+    assert_test "tasks/00_host_prep_darwin.yml: resolves HOMEBREW_PREFIX and architecture-specific prefix without sudo" 1
 fi
 
 # Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml implements Docker CE installation and readiness verification
@@ -874,14 +946,14 @@ else
     assert_test "matrix flows 4 & 5 (Rocky): handles curl-minimal without DNF conflict and ensures docker group exists" 1
 fi
 
-# Matrix Flows 2-5 Test: 00_host_prep_{ubuntu,rocky}.yml guard Docker service and group behind presence audits
-if grep -q "docker_daemon_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
-   grep -q "docker_daemon_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
-   grep -q "user_docker_group_check_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
-   grep -q "user_docker_group_check_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
-    assert_test "privilege guard: Docker service & group tasks guarded behind presence audits to avoid unneeded sudo" 0
+# Matrix Flows 2-5 Test: 00_host_prep_{ubuntu,rocky}.yml guard Docker service and group behind native Ansible facts
+if grep -q "docker_service_active_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "docker_service_active_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" && \
+   grep -q "user_in_docker_group_rocky" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml" && \
+   grep -q "user_in_docker_group_ubuntu" "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml"; then
+    assert_test "privilege guard: Docker service & group tasks guarded behind native Ansible facts to avoid unneeded sudo" 0
 else
-    assert_test "privilege guard: Docker service & group tasks guarded behind presence audits to avoid unneeded sudo" 1
+    assert_test "privilege guard: Docker service & group tasks guarded behind native Ansible facts to avoid unneeded sudo" 1
 fi
 
 # Regression Test: tasks/00_host_prep_{ubuntu,rocky}.yml guards systemd Docker activation against non-init container test runners
@@ -1029,18 +1101,10 @@ else
 fi
 
 # Regression Test: tasks/*.yml contains zero empty array expansions (${arr[@]} on arr=()) under set -u (macOS bash 3.2 bug)
-if command -v ruby >/dev/null 2>&1; then
-    EMPTY_ARR_STATUS=$(ruby -e '
-    bad = false
-    Dir.glob("'"${K8S_DIR}"'/ansible/tasks/*.yml").sort.each do |f|
-      c = File.read(f)
-      if c =~ /=\(\)\s*.*?\"?\$\{\w+\[@\]\}\"?/m
-        bad = true
-      end
-    end
-    exit(bad ? 1 : 0)
-    ' 2>/dev/null && echo "0" || echo "1")
-    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" "$EMPTY_ARR_STATUS"
+if ! grep -Eq '\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}' "${K8S_DIR}"/ansible/tasks/*.yml; then
+    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" 0
+else
+    assert_test "tasks/*.yml: Zero empty array expansions under set -u (macOS bash 3.2 compatibility)" 1
 fi
 
 # Regression Test: task [6/8] mogenius helm upgrade executes cleanly in /bin/bash set -euo pipefail (both latest & pinned version)
@@ -1254,13 +1318,7 @@ else
 fi
 
 # Verify Jinja2 template rendering for Testkube workflows
-JINJA_RENDER_PY=""
-for candidate_py in /opt/homebrew/Cellar/ansible/*/libexec/bin/python $(which python3 python 2>/dev/null); do
-    if [ -x "$candidate_py" ] && "$candidate_py" -c "import jinja2, yaml" >/dev/null 2>&1; then
-        JINJA_RENDER_PY="$candidate_py"
-        break
-    fi
-done
+JINJA_RENDER_PY="${RUNTIME_TEST_PY:-}"
 
 if [ -n "$JINJA_RENDER_PY" ]; then
     for tmpl in "test-workflow.yaml.j2" "test-workflow-security.yaml.j2" "test-workflow-sustained-load.yaml.j2"; do
@@ -1304,6 +1362,105 @@ if ! grep -q "revision: main" "${K8S_DIR}/testkube/templates/"*.j2; then
     assert_test "Testkube templates: Hermetic self-contained content.files (no external GitHub main pinning)" 0
 else
     assert_test "Testkube templates: External GitHub revision: main pinning still present" 1
+fi
+
+# Verify cross-platform Linux/Debian sudo tty_tickets fix: build_ansible_args auto-appends --ask-become-pass when SUDO_NEEDS_PASS=true and host_needs_privilege is true
+(
+    HOST_PLATFORM="Linux"
+    MOCK_UID=1000
+    FORCE_ASK_BECOME=false
+    SUDO_NEEDS_PASS=true
+    CONFIGURE_HOST_SYSCTL=true
+    build_ansible_args
+    has_flag=false
+    for arg in "${ANSIBLE_ARGS[@]}"; do
+        [ "$arg" == "--ask-become-pass" ] && has_flag=true
+    done
+    [ "$has_flag" = true ]
+) && assert_test "build_ansible_args(): Auto-appends --ask-become-pass on Debian/Linux (tty_tickets) when SUDO_NEEDS_PASS=true and host_needs_privilege=true" 0 || \
+   assert_test "build_ansible_args(): Auto-appends --ask-become-pass on Debian/Linux (tty_tickets) when SUDO_NEEDS_PASS=true and host_needs_privilege=true" 1
+
+# Verify Debian /usr/sbin:/sbin PATH inclusion in bootstrap_cluster.sh and Makefile
+if grep -q "/usr/sbin:/sbin" "${BOOTSTRAP_SCRIPT}" && grep -q "/usr/sbin:/sbin" "${REPO_ROOT}/Makefile"; then
+    assert_test "Debian PATH compatibility: /usr/sbin:/sbin exported in bootstrap_cluster.sh and Makefile" 0
+else
+    assert_test "Debian PATH compatibility: /usr/sbin:/sbin missing" 1
+fi
+
+# Verify values-mogenius.yaml warmPool.updateStrategy is set to Immediate
+if grep -q "updateStrategy: Immediate" "${K8S_DIR}/helm/values-mogenius.yaml"; then
+    assert_test "values-mogenius.yaml: warmPool.updateStrategy is Immediate (prevents stale standby pods)" 0
+else
+    assert_test "values-mogenius.yaml: warmPool.updateStrategy is not Immediate" 1
+fi
+
+# Verify testkube/rbac.yaml grants pod delete permission for Freshness Gate recycling
+if grep -A 10 'resources:' "${K8S_DIR}/testkube/rbac.yaml" | grep -q '"delete"'; then
+    assert_test "testkube/rbac.yaml: grants pod delete permission for Freshness Gate recycling" 0
+else
+    assert_test "testkube/rbac.yaml: pod delete permission missing" 1
+fi
+
+# Verify monitoring/sandbox-latency-exporter.yaml supports per-vector drift updates and cold/warm launch_type
+if grep -q 'launch_type="cold"' "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" && \
+   grep -q 'active_sandboxes' "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml" && \
+   grep -q 'for vec in list(state\["vectors"\].keys())' "${K8S_DIR}/monitoring/sandbox-latency-exporter.yaml"; then
+    assert_test "monitoring/sandbox-latency-exporter.yaml: supports per-vector drift updates and cold/warm launch_type" 0
+else
+    assert_test "monitoring/sandbox-latency-exporter.yaml: per-vector drift or cold launch_type missing" 1
+fi
+
+# Verify TestWorkflow templates implement Freshness Gate (forceFreshPods), /proc/uptime latency, and cgroup audit
+if grep -q "forceFreshPods" "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2" && \
+   grep -q "/proc/uptime" "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2" && \
+   grep -q "/sys/fs/cgroup/cpu.max" "${K8S_DIR}/testkube/templates/test-workflow.yaml.j2" && \
+   grep -q "QUERY_VEC" "${K8S_DIR}/testkube/templates/test-workflow-security.yaml.j2"; then
+    assert_test "testkube/templates/*.j2: implements Freshness Gate (forceFreshPods), /proc/uptime latency, and cgroup audit" 0
+else
+    assert_test "testkube/templates/*.j2: Freshness Gate, /proc/uptime, or cgroup audit missing" 1
+fi
+
+# Verify standalone k6 scripts support multi-sandbox round-robin (SANDBOX_IDS) for Scaled-Out mode
+if grep -q "SANDBOX_IDS" "${K8S_DIR}/testkube/tests/k6-sandbox-benchmark.js" && \
+   grep -q "SANDBOX_IDS" "${K8S_DIR}/testkube/tests/k6-sustained-load.js" && \
+   grep -q "__ITER % SANDBOX_LIST.length" "${K8S_DIR}/testkube/tests/k6-sandbox-benchmark.js"; then
+    assert_test "testkube/tests/k6-*.js: supports multi-sandbox round-robin (SANDBOX_IDS) for Scaled-Out mode" 0
+else
+    assert_test "testkube/tests/k6-*.js: multi-sandbox round-robin (SANDBOX_IDS) missing" 1
+fi
+
+# Verify Makefile supports SANDBOX_COUNT, CODE_VERSION, and FORCE_FRESH test parameters
+if grep -q "SANDBOX_COUNT" "${REPO_ROOT}/Makefile" && \
+   grep -q "CODE_VERSION" "${REPO_ROOT}/Makefile" && \
+   grep -q "FORCE_FRESH" "${REPO_ROOT}/Makefile"; then
+    assert_test "Makefile: supports SANDBOX_COUNT, CODE_VERSION, and FORCE_FRESH test parameters" 0
+else
+    assert_test "Makefile: SANDBOX_COUNT, CODE_VERSION, or FORCE_FRESH missing" 1
+fi
+
+# Verify Stage 0 tasks use native Ansible (getent, set_fact, group, user, service_facts) to check and add invoking user to docker group BEFORE checking Docker daemon service status
+for task_file in "${K8S_DIR}/ansible/tasks/00_host_prep_ubuntu.yml" "${K8S_DIR}/ansible/tasks/00_host_prep_rocky.yml"; do
+    bname="$(basename "$task_file")"
+    getent_line=$(grep -n "ansible.builtin.getent:" "$task_file" | head -n1 | cut -d: -f1)
+    grp_line=$(grep -n "Add invoking user to docker group" "$task_file" | head -n1 | cut -d: -f1)
+    svc_line=$(grep -n "ansible.builtin.service_facts:" "$task_file" | head -n1 | cut -d: -f1)
+    if [ -n "$getent_line" ] && [ -n "$grp_line" ] && [ -n "$svc_line" ] && \
+       [ "$getent_line" -lt "$grp_line" ] && [ "$grp_line" -lt "$svc_line" ] && \
+       grep -q "getent_group" "$task_file"; then
+        assert_test "tasks/${bname}: natively queries getent_group (line ${getent_line}) and adds user to docker group (line ${grp_line}) BEFORE service_facts daemon check (line ${svc_line})" 0
+    else
+        assert_test "tasks/${bname}: natively queries getent_group and adds user to docker group BEFORE service_facts daemon check" 1
+    fi
+done
+
+# Verify 00_host_prep.yml natively checks /usr/bin/sudo.ws via ansible.builtin.stat before switching ansible_become_exe (Ubuntu 25.10+ sudo-rs compatibility)
+stat_line=$(grep -n "ansible.builtin.stat:" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" | head -n1 | cut -d: -f1)
+exe_line=$(grep -n "ansible_become_exe: /usr/bin/sudo.ws" "${K8S_DIR}/ansible/tasks/00_host_prep.yml" | head -n1 | cut -d: -f1)
+if [ -n "$stat_line" ] && [ -n "$exe_line" ] && [ "$stat_line" -lt "$exe_line" ] && \
+   grep -q "sudo_ws_stat.stat.exists" "${K8S_DIR}/ansible/tasks/00_host_prep.yml"; then
+    assert_test "tasks/00_host_prep.yml: checks /usr/bin/sudo.ws via ansible.builtin.stat (line ${stat_line}) before switching ansible_become_exe (line ${exe_line})" 0
+else
+    assert_test "tasks/00_host_prep.yml: checks /usr/bin/sudo.ws via ansible.builtin.stat before switching ansible_become_exe" 1
 fi
 
 # ==============================================================================

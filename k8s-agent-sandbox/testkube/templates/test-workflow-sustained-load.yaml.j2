@@ -30,6 +30,18 @@ spec:
       description: Sustained Benchmark Duration (e.g. 150s for ~10.5K requests)
       type: string
       default: "150s"
+    sandboxCount:
+      description: Number of Active Warm-Pool Sandboxes to Target (Scaled-Out Mode)
+      type: integer
+      default: 1
+    codeVersion:
+      description: Target Container / Code Version Stamp to Verify in Each Pod
+      type: string
+      default: "v1.2.1"
+    forceFreshPods:
+      description: Recycle warm-pool pods before sustained load to guarantee fresh container/code
+      type: string
+      default: "false"
   content:
     files:
     - path: k6-sustained-load.js
@@ -62,20 +74,24 @@ spec:
         if (!BASE_URL) {
           throw new Error('FATAL: TARGET_URL environment variable is required.');
         }
-        const SANDBOX_ID = __ENV.SANDBOX_ID;
+        const RAW_IDS = __ENV.SANDBOX_IDS || __ENV.SANDBOX_ID || '';
+        const SANDBOX_LIST = RAW_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+        if (SANDBOX_LIST.length === 0) {
+          throw new Error('FATAL: SANDBOX_ID or SANDBOX_IDS environment variable is required.');
+        }
         const SANDBOX_NAMESPACE = 'agent-sandbox';
         const SANDBOX_PORT = '8080';
 
-        const HEADERS = {
-          'Host': 'sandbox.127.0.0.1.nip.io',
-          'X-Sandbox-ID': SANDBOX_ID,
-          'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
-          'X-Sandbox-Port': SANDBOX_PORT,
-          'User-Agent': 'k6-testkube-sustained-load',
-        };
-
         export default function () {
-          const res = http.get(`${BASE_URL}/manifest.json`, { headers: HEADERS });
+          const targetSandbox = SANDBOX_LIST[__ITER % SANDBOX_LIST.length];
+          const headers = {
+            'Host': 'sandbox.127.0.0.1.nip.io',
+            'X-Sandbox-ID': targetSandbox,
+            'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
+            'X-Sandbox-Port': SANDBOX_PORT,
+            'User-Agent': 'k6-testkube-sustained-load',
+          };
+          const res = http.get(`${BASE_URL}/manifest.json`, { headers });
           const ok = check(res, {
             'status is 200': (r) => r.status === 200,
           });
@@ -83,25 +99,59 @@ spec:
           manifestLatency.add(res.timings.duration);
         }
   steps:
-  - name: Locate Active Warm-Pool Sandbox (No Restart / No Teardown)
+  - name: Locate & Verify Active Warm-Pool Sandboxes (Scaled-Out & Version Audit)
     run:
       image: bitnami/kubectl:latest
+      env:
+      - name: SANDBOX_COUNT
+        value: "{% raw %}{{ config.sandboxCount }}{% endraw %}"
+      - name: CODE_VERSION
+        value: "{% raw %}{{ config.codeVersion }}{% endraw %}"
+      - name: FORCE_FRESH
+        value: "{% raw %}{{ config.forceFreshPods }}{% endraw %}"
       shell: |
         set -e
-        echo "=== Locating active standby pod from warm pool 'default' ==="
+        COUNT="${SANDBOX_COUNT:-1}"
         SELECTOR=$(kubectl -n agent-sandbox get sandboxwarmpool default -o jsonpath='{.status.selector}')
-        SANDBOX_ID=$(kubectl -n agent-sandbox get pods -l "$SELECTOR" -o jsonpath='{.items[0].metadata.name}')
 
-        if [ -z "$SANDBOX_ID" ]; then
+        if [ "$FORCE_FRESH" = "true" ] && [ -n "$SELECTOR" ]; then
+          echo "=== [Freshness Gate] Recycling warm-pool pods to guarantee fresh container/code ($CODE_VERSION) ==="
+          kubectl -n agent-sandbox delete pods -l "$SELECTOR" --wait=true --timeout=30s >/dev/null 2>&1 || true
+          kubectl -n agent-sandbox wait --for=condition=Ready pod -l "$SELECTOR" --timeout=60s >/dev/null
+        fi
+
+        echo "=== Locating up to $COUNT active standby pod(s) from warm pool 'default' ==="
+        ALL_PODS=$(kubectl -n agent-sandbox get pods -l "$SELECTOR" --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}')
+        if [ -z "$ALL_PODS" ]; then
           echo "ERROR: No active warm-pool sandbox found!"
           exit 1
         fi
 
-        echo "Targeting active warm-pool sandbox: $SANDBOX_ID"
-        echo "NOTE: This workflow does NOT claim or delete the sandbox, so the pod will NOT be restarted."
-        echo "$SANDBOX_ID" > /data/sandbox_id.txt
+        SELECTED_IDS=""
+        IDX=0
+        for POD in $ALL_PODS; do
+          IDX=$((IDX + 1))
+          [ "$IDX" -gt "$COUNT" ] && break
+          POD_INFO=$(kubectl -n agent-sandbox exec "$POD" -- sh -c "
+            echo '${CODE_VERSION}' > /home/coder/project/.code_version
+            VER=\$(cat /home/coder/project/.code_version)
+            CPU_MAX=\$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo 'unknown')
+            MEM_MAX=\$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo 'unknown')
+            echo \"version=\${VER} | cpu.max=\${CPU_MAX} | memory.max=\${MEM_MAX}\"
+          ")
+          echo "  [${IDX}] Targeting Warm-Pool Pod: ${POD} | ${POD_INFO}"
+          if [ -z "$SELECTED_IDS" ]; then
+            SELECTED_IDS="$POD"
+          else
+            SELECTED_IDS="${SELECTED_IDS},${POD}"
+          fi
+        done
 
-  - name: Run 70 RPS Sustained Load (10K+ Requests)
+        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?active_sandboxes=${IDX}" >/dev/null 2>&1 || true
+        echo "$SELECTED_IDS" > /data/sandbox_ids.txt
+        echo "Active Warm-Pool Sandboxes for k6 Round-Robin: $SELECTED_IDS"
+
+  - name: Run Sustained Load Across Active Warm-Pool Sandboxes
     run:
       image: grafana/k6:latest
       env:
@@ -112,10 +162,11 @@ spec:
       - name: BENCH_DURATION
         value: "{% raw %}{{ config.duration }}{% endraw %}"
       shell: |
-        if [ -f /data/sandbox_id.txt ]; then
-          export SANDBOX_ID=$(cat /data/sandbox_id.txt)
+        if [ -f /data/sandbox_ids.txt ]; then
+          export SANDBOX_IDS=$(cat /data/sandbox_ids.txt)
+          export SANDBOX_ID=$(echo "$SANDBOX_IDS" | cut -d',' -f1)
         fi
-        echo "=== Firing sustained load ($QPS RPS for $BENCH_DURATION) at Sandbox ($SANDBOX_ID) via Ingress ($TARGET_URL) ==="
+        echo "=== Firing sustained load ($QPS RPS for $BENCH_DURATION) across Sandboxes ($SANDBOX_IDS) via Ingress ($TARGET_URL) ==="
         SCRIPT_PATH=$(find / -name "k6-sustained-load.js" 2>/dev/null | head -n 1)
         if [ -z "$SCRIPT_PATH" ]; then
           echo "ERROR: k6-sustained-load.js not found!"

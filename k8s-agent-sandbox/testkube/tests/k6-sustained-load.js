@@ -28,21 +28,25 @@ const BASE_URL = __ENV.TARGET_URL;
 if (!BASE_URL) {
   throw new Error('FATAL: TARGET_URL environment variable is required. Example: TARGET_URL=http://$(minikube ip):80 k6 run ...');
 }
-const SANDBOX_ID = __ENV.SANDBOX_ID;
+const RAW_IDS = __ENV.SANDBOX_IDS || __ENV.SANDBOX_ID || '';
+const SANDBOX_LIST = RAW_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+if (SANDBOX_LIST.length === 0) {
+  throw new Error('FATAL: SANDBOX_ID or SANDBOX_IDS environment variable is required.');
+}
 const SANDBOX_NAMESPACE = 'agent-sandbox';
 const SANDBOX_PORT = '8080';
 
-const HEADERS = {
-  'Host': 'sandbox.127.0.0.1.nip.io',
-  'X-Sandbox-ID': SANDBOX_ID,
-  'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
-  'X-Sandbox-Port': SANDBOX_PORT,
-  'User-Agent': 'k6-testkube-sustained-load',
-};
-
 export default function () {
+  const targetSandbox = SANDBOX_LIST[__ITER % SANDBOX_LIST.length];
+  const headers = {
+    'Host': 'sandbox.127.0.0.1.nip.io',
+    'X-Sandbox-ID': targetSandbox,
+    'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
+    'X-Sandbox-Port': SANDBOX_PORT,
+    'User-Agent': 'k6-testkube-sustained-load',
+  };
   // Fire high-throughput requests at the sandbox workbench manifest
-  const res = http.get(`${BASE_URL}/manifest.json`, { headers: HEADERS });
+  const res = http.get(`${BASE_URL}/manifest.json`, { headers });
   const ok = check(res, {
     'status is 200': (r) => r.status === 200,
   });

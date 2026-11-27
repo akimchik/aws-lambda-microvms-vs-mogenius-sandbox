@@ -9,6 +9,23 @@
 # Flow 5: Linux Rocky Linux 9 & 10 (RedHat aarch64)
 # ==============================================================================
 
+- name: "[0/8] Check if traditional C sudo (/usr/bin/sudo.ws) is present (Ubuntu 25.10+ sudo-rs compatibility)"
+  ansible.builtin.stat:
+    path: /usr/bin/sudo.ws
+  register: sudo_ws_stat
+  check_mode: false
+  when: ansible_facts['system'] == 'Linux'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8] Switch ansible_become_exe to /usr/bin/sudo.ws when present"
+  ansible.builtin.set_fact:
+    ansible_become_exe: /usr/bin/sudo.ws
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - sudo_ws_stat.stat is defined
+    - sudo_ws_stat.stat.exists | default(false) | bool
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8] Map normalized CPU architecture facts (cli_arch and runsc_arch)"
   ansible.builtin.set_fact:
     cli_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['arm64', 'aarch64'] else 'amd64' }}"

@@ -37,6 +37,8 @@ data:
         "api.github.com",
         "raw.githubusercontent.com"
     ]
+    EXTRA_HOSTS = [h.strip() for h in os.environ.get("EXTRA_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    WHITELIST_HOSTS.extend(EXTRA_HOSTS)
 
     GITHUB_TOKEN = os.environ.get("GITHUB_APP_INSTALLATION_TOKEN", "")
 
@@ -86,6 +88,15 @@ data:
                         "error": "BLOCKED_BY_L7_POLICY",
                         "message": f"Outbound access to '{target_host}' is blocked by Sandbox Egress Policy.",
                         "allowed_domains": WHITELIST_HOSTS
+                    })
+                    return
+
+                # If domain was dynamically whitelisted via EXTRA_ALLOWED_HOSTS (drift simulation) or upstream responds
+                if target_host in EXTRA_HOSTS:
+                    self._send_json(200, {
+                        "status": "ALLOWED_BY_L7_POLICY",
+                        "host": target_host,
+                        "warning": "Domain permitted via EXTRA_ALLOWED_HOSTS policy override"
                     })
                     return
 

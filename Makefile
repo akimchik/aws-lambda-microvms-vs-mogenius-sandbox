@@ -4,7 +4,7 @@
 # Provides fast static checks (zero VM spin-up) vs. full cluster reconciliation.
 # ==============================================================================
 
-export PATH := /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$(PATH)
+export PATH := /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$(PATH)
 
 .PHONY: all help test check dry-run preflight cluster bootstrap clean status test-security test-benchmark test-load
 
@@ -30,7 +30,8 @@ help:
 	@echo ""
 	@echo "Options:"
 	@echo "  Pass ARGS='<flags>' to forward CLI options (e.g., make cluster ARGS='-K' or make preflight ARGS='--memory 4096')"
-	@echo "  Pass DURATION='<time>' QPS='<rate>' TARGET_URL='<url>' to test targets (e.g., make test-load DURATION=2m QPS=100)"
+	@echo "  Pass DURATION='<time>' QPS='<rate>' SANDBOX_COUNT='<N>' CODE_VERSION='<ver>' FORCE_FRESH='<true|false>' to test targets"
+	@echo "  Examples: make test-load DURATION=2m QPS=100 SANDBOX_COUNT=3 | make test-benchmark CODE_VERSION=v2.0 FORCE_FRESH=true"
 
 # Fast verification: syntax, YAML schemas, and unit tests (Zero VM spinup)
 test check:
@@ -64,7 +65,15 @@ status:
 DURATION ?=
 QPS ?=
 TARGET_URL ?=
-TK_CFG = $(if $(DURATION),--config duration=$(DURATION)) $(if $(QPS),--config qps=$(QPS)) $(if $(TARGET_URL),--config targetUrl=$(TARGET_URL))
+SANDBOX_COUNT ?=
+CODE_VERSION ?=
+FORCE_FRESH ?=
+TK_CFG = $(if $(DURATION),--config duration=$(DURATION)) \
+         $(if $(QPS),--config qps=$(QPS)) \
+         $(if $(TARGET_URL),--config targetUrl=$(TARGET_URL)) \
+         $(if $(SANDBOX_COUNT),--config sandboxCount=$(SANDBOX_COUNT)) \
+         $(if $(CODE_VERSION),--config codeVersion=$(CODE_VERSION)) \
+         $(if $(FORCE_FRESH),--config forceFreshPods=$(FORCE_FRESH))
 
 test-security:
 	@echo "==> Triggering Testkube Security & Red-Team Audit Workflow..."

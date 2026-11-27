@@ -7,6 +7,18 @@
   check_mode: false
   tags: [always, minikube, sizing]
 
+- name: "[1/8] Assert current user can operate as an active member of the docker group"
+  ansible.builtin.assert:
+    that:
+      - docker_mem_raw.rc is defined and docker_mem_raw.rc == 0
+    fail_msg: >-
+      [STAGE 1 BLOCKED] Current user '{{ ansible_facts['user_id'] }}' cannot access the Docker daemon socket (/var/run/docker.sock).
+      On Linux, if Stage 0 just added '{{ ansible_facts['user_id'] }}' to /etc/group ('docker'), your current shell session still holds
+      its pre-login group list: run 'newgrp docker' (or log out and back in) and re-run 'make cluster'.
+      On macOS, ensure Docker Desktop / OrbStack / Colima is running ('open -a Docker') and re-run 'make cluster'.
+  when: not (dry_run_mode | bool)
+  tags: [minikube, sizing]
+
 - name: "[1/8] Compute effective memory ceiling and auto-clamp if < 8192 MB"
   ansible.builtin.set_fact:
     detected_mem_mb: >-
@@ -52,7 +64,7 @@
     kubectl taint node {{ minikube_worker_node }} dedicated=testkube:NoSchedule --overwrite >/dev/null 2>&1 || true
 
     # Configure high-concurrency inotify and open file limits inside Minikube nodes to prevent 'failed to create fsnotify watcher: too many open files'
-    for node in minikube {{ minikube_worker_node }}; do
+    for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
       minikube ssh -n "$node" "sudo sysctl -w fs.inotify.max_user_watches={{ k8s_sysctl_params['fs.inotify.max_user_watches'] }} fs.inotify.max_user_instances={{ k8s_sysctl_params['fs.inotify.max_user_instances'] }} fs.file-max={{ nofile_controls.linux.fs_file_max }} vm.max_map_count={{ k8s_sysctl_params['vm.max_map_count'] }} 2>/dev/null || true" >/dev/null 2>&1 || true
     done
   args:

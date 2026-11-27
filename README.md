@@ -25,7 +25,7 @@ This repository contains the end-to-end reference architectures, deployment mani
 ```text
 .
 ├── .github/workflows/
-│   └── bootstrap-matrix-test.yaml       # Multi-OS (macOS, Ubuntu, Rocky Linux) & Multi-Arch (x86_64, aarch64) CI matrix
+│   └── bootstrap-matrix-test.yaml       # 7-job Multi-OS (macOS, Ubuntu, Debian 13, Rocky Linux 9) & Multi-Arch (x86_64, aarch64) CI matrix
 ├── aws-lambda-microvms/                 # Original AWS Lambda MicroVMs (Firecracker) Workshop
 │   ├── module-1/                        # Basic MicroVM execution & Port-9000 lifecycle hooks
 │   ├── module-2/                        # Event-driven Pull Request code reviewer
@@ -158,21 +158,21 @@ The distinct images add up to only ~2.8 GB as reported by `crictl`; the rest is 
 
 To eliminate typing long nested script paths or memorizing CLI flags, the root [`Makefile`](Makefile) provides unified shortcuts for every stage of development, testing, and cluster lifecycle management:
 
-| Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile |
-| :--- | :--- | :--- | :--- |
-| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: Unit tests, YAML linting, platform & arch matrix |
-| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit |
-| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery & installation (`[0/8]`) |
-| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Minikube + gVisor + mogenius + Testkube) |
-| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods |
-| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows |
-| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20`) |
-| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold-start benchmark (`DURATION=30s QPS=60`) |
-| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS load test (e.g. `make test-load DURATION=2m QPS=100`) |
+| Goal / Stage | Make Target (Recommended) | Direct Script Equivalent | Execution Profile | Privilege (`sudo` / `BECOME`) Required |
+| :--- | :--- | :--- | :--- | :--- |
+| **Fast Verification** | `make check` *(or `make test`)* | `./k8s-agent-sandbox/scripts/test_multios_bootstrap.sh` | **Zero VM (~15s)**: 143 unit, live HTTP runtime, POSIX `/bin/sh` & Jinja2 tests | ❌ No |
+| **Read-Only Audit** | `make dry-run` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run` | **Zero VM (~5s)**: Ansible `--check --diff`, host tool & sizing audit | ❌ No |
+| **Tool Preflight** | `make preflight` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only` | Host CLI discovery, Docker install & `docker` group setup (`[0/8]`) | ⚠️ **Yes (`sudo` on Linux) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No once configured |
+| **Reconcile Cluster**| `make cluster` | `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` | Full 8-layer deployment (Stage 0 preflight + Stages 1–8 user-space K8s) | ⚠️ **Yes (`sudo` in Stage 0) if tools/Docker missing, `docker.service` stopped, or user not in `docker` group**; ❌ No (100% user space) once configured |
+| **Cluster Status** | `make status` | `kubectl get nodes -o wide && kubectl get pods -A` | Prints status of Minikube nodes and workload pods | ❌ No |
+| **Teardown** | `make clean` | `minikube delete && rm -f k8s-agent-sandbox/testkube/test-workflow*.yaml` | Deletes local Minikube cluster nodes & rendered workflows | ❌ No |
+| **Security Audit** | `make test-security` | `testkube run tw agent-sandbox-security-audit -f` | In-guest threat probe + k6 fuzzing (`DURATION=1m QPS=20 FORCE_FRESH=true`) | ❌ No |
+| **Performance Benchmark** | `make test-benchmark` | `testkube run tw agent-sandbox-benchmark -f` | 60 QPS concurrency & cold/warm benchmark (`DURATION=30s QPS=60 SANDBOX_COUNT=1 CODE_VERSION=v1.2.1 FORCE_FRESH=true`) | ❌ No |
+| **Sustained Load** | `make test-load` | `testkube run tw agent-sandbox-sustained-load -f` | Sustained 70 RPS multi-sandbox load test (`DURATION=2m QPS=100 SANDBOX_COUNT=3`) | ❌ No |
 
 > [!NOTE]
 > **Privilege Escalation & Sudo Model:**
-> Standard cluster reconciliation runs **100% in user space** with zero root requirements and zero password prompts. Host `/etc/sysctl.d` and PAM file limit modifications are strictly opt-in (`--configure-host-sysctl`). For the complete architectural breakdown of the sudo keepalive loop, privilege boundaries, and CLI options, see the **[Privilege Escalation & Sudo Lifecycle Guide](docs/MULTI_OS_SETUP_GUIDE.md#privilege-escalation-sudo-lifecycle--security-model)** in the Multi-OS Setup Guide.
+> Stages 1–8 (Minikube, gVisor, Helm releases, mogenius, Testkube) run **100% in user space** with zero root requirements. In Stage 0 (`[0/8]`), `sudo` (`BECOME password:`) is required on Linux **only** when installing missing CLI tools/Docker to `/usr/local/bin`, starting `docker.service` if stopped, adding the invoking user to the `docker` group (`/etc/group`) via native Ansible (`ansible.builtin.getent` + `ansible.builtin.user`), or when `--configure-host-sysctl` is explicitly passed. Once prerequisites and `docker` group membership are in place, `make cluster` and `make preflight` require **zero sudo calls and zero password prompts**. For the full breakdown, see the **[Privilege Escalation & Sudo Lifecycle Guide](docs/MULTI_OS_SETUP_GUIDE.md#privilege-escalation-sudo-lifecycle--security-model)** in the Multi-OS Setup Guide.
 
 ---
 
@@ -260,14 +260,14 @@ done
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
 1. **Audit or Provision the Full 2-Node Cluster via `make` (Ansible Reconciler):**
-   - **Fast Verification Suite:** Run `make check` to execute all 134 unit, syntax, and Jinja2 template rendering tests (~15s, zero VM spin-up).
+   - **Fast Verification Suite:** Run `make check` to execute all 143 unit, syntax, live HTTP runtime (`egress-broker` + `threat_probe.py` & `sandbox-latency-exporter`), POSIX `/bin/sh -e`, and Jinja2 template rendering tests (~15s, zero VM spin-up).
    - **Read-Only Dry Run (Zero Changes):** Run `make dry-run` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --dry-run`) to execute a non-mutating preflight audit (`ansible-playbook --check --diff`).
    - **Host Toolchain Discovery:** Run `make preflight` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh --preflight-only`) to ensure required host binaries are present and exit before cluster changes.
    - **Full Cluster Reconciliation:** Run `make cluster` (`./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`), which delegates all 8 architecture layers to `k8s-agent-sandbox/ansible/playbooks/site.yml`, dynamically captures `minikube ip`, renders the Testkube workflow templates, and verifies all 11 service endpoints.
-2. **Run Continuous Red-Team Security & Benchmark Workflows via `make`:**
-   - `make test-security` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing)*
-   - `make test-benchmark` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark with scale-to-zero)*
-   - `make test-load` *(or `make test-load DURATION=2m QPS=70` — sustained load targeting active sandbox without pod restarts)*
+2. **Run Continuous Red-Team Security, Freshness Gate, Scaled-Up & Scaled-Out Workflows via `make`:**
+   - `make test-security` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing; supports live drift verification via `EXTRA_ALLOWED_HOSTS` on `egress-broker`)*
+   - `make test-benchmark` *(Freshness Gate `FORCE_FRESH=true`, cgroup v2 `cpu.max`/`memory.max` & `CODE_VERSION` audit, `/proc/uptime` warm vs. cold claim latency, and multi-sandbox fan-out via `SANDBOX_COUNT=3`)*
+   - `make test-load` *(e.g. `make test-load DURATION=2m QPS=100 SANDBOX_COUNT=3` — sustained round-robin load across N claimed sandboxes without pod restarts)*
 3. **Execute Interactive Demo Modules 1–4:** (`SandboxWarmPool`, Ephemeral CI/CD, Multi-Tenant PVC Isolation, `operatingMode: Suspended`, and `kubectl debug`).
 4. **Inspect Live Telemetry & Security Posture in Grafana:** (`http://grafana.127.0.0.1.nip.io`, login `admin` / `admin`).
 

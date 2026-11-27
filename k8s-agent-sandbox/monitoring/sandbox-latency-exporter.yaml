@@ -13,7 +13,10 @@ data:
     state = {
         "warm_sum": 0.0,
         "warm_count": 0,
+        "cold_sum": 0.0,
+        "cold_count": 0,
         "last_latency": 0.0,
+        "active_sandboxes": 1,
         "security_runs": 0,
         "security_checks_passed": 6,
         "vectors": {
@@ -34,13 +37,23 @@ data:
                 try:
                     if "latency_ms" in qs:
                         lat = float(qs.get("latency_ms", [0])[0])
-                        state["warm_sum"] += lat
-                        state["warm_count"] += 1
+                        ltype = qs.get("launch_type", ["warm" if lat < 1000.0 else "cold"])[0]
+                        if ltype == "cold":
+                            state["cold_sum"] += lat
+                            state["cold_count"] += 1
+                        else:
+                            state["warm_sum"] += lat
+                            state["warm_count"] += 1
                         state["last_latency"] = lat
+                    if "active_sandboxes" in qs:
+                        state["active_sandboxes"] = int(qs.get("active_sandboxes", [1])[0])
                     if "security_passed" in qs:
                         passed = int(qs.get("security_passed", [6])[0])
                         state["security_runs"] += 1
                         state["security_checks_passed"] = passed
+                    for vec in list(state["vectors"].keys()):
+                        if vec in qs:
+                            state["vectors"][vec] = int(qs.get(vec, [1])[0])
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -67,13 +80,18 @@ data:
                 self.end_headers()
 
                 out = [
-                    "# HELP agent_sandbox_claim_controller_startup_latency_ms Warm Pool Claim-to-Ready latency",
+                    "# HELP agent_sandbox_claim_controller_startup_latency_ms Warm/Cold Pool Claim-to-Ready latency",
                     "# TYPE agent_sandbox_claim_controller_startup_latency_ms counter",
                     f'agent_sandbox_claim_controller_startup_latency_ms_sum{{launch_type="warm"}} {state["warm_sum"]}',
                     f'agent_sandbox_claim_controller_startup_latency_ms_count{{launch_type="warm"}} {state["warm_count"]}',
+                    f'agent_sandbox_claim_controller_startup_latency_ms_sum{{launch_type="cold"}} {state["cold_sum"]}',
+                    f'agent_sandbox_claim_controller_startup_latency_ms_count{{launch_type="cold"}} {state["cold_count"]}',
                     "# HELP agent_sandbox_claim_latency_last_ms Last measured claim latency in ms",
                     "# TYPE agent_sandbox_claim_latency_last_ms gauge",
                     f'agent_sandbox_claim_latency_last_ms {state["last_latency"]}',
+                    "# HELP agent_sandbox_active_test_sandboxes Number of concurrent sandboxes targeted in test",
+                    "# TYPE agent_sandbox_active_test_sandboxes gauge",
+                    f'agent_sandbox_active_test_sandboxes {state["active_sandboxes"]}',
                     "# HELP agent_sandbox_security_audit_runs_total Total automated red-team security probe runs",
                     "# TYPE agent_sandbox_security_audit_runs_total counter",
                     f'agent_sandbox_security_audit_runs_total {state["security_runs"]}',

@@ -248,16 +248,16 @@ def check_broker_egress(broker_url):
                 "target": c2_url,
                 "status": "PASS (BLOCKED_BY_BROKER)",
                 "latency_ms": round(elapsed, 2),
-                "detail": f"Broker successfully rejected unwhitelisted FQDN with HTTP 403 Forbidden"
+                "detail": "Broker successfully rejected unwhitelisted FQDN with HTTP 403 Forbidden"
             })
         else:
             results.append({
                 "id": "T6B_BROKER_POLICY_ENFORCEMENT",
                 "name": "Broker L7 Domain Filtering",
                 "target": c2_url,
-                "status": "PASS (BLOCKED_BY_BROKER)",
+                "status": "FAIL (EXPOSED)",
                 "latency_ms": round(elapsed, 2),
-                "detail": f"Broker returned HTTP {e.code}"
+                "detail": f"Broker did not reject with HTTP 403 (returned HTTP {e.code})"
             })
     except Exception as e:
         elapsed = (time.time() - start) * 1000

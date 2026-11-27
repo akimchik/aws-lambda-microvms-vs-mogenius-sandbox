@@ -1,12 +1,12 @@
 ---
 # ==============================================================================
-# FLOWS 2 & 3: Ubuntu Linux (x86_64 & aarch64) Host Toolchain Preparation
+# FLOWS 2 & 3: Ubuntu / Debian Linux (x86_64 & aarch64) Host Toolchain Preparation
 # Package Manager: apt-get
 # ==============================================================================
 
 - name: "[0/8 Ubuntu] Check if base utilities are installed (curl, tar, jq, bzip2, openssl)"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     for tool in curl tar jq bzip2 openssl; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "MISSING:$tool"
@@ -73,7 +73,7 @@
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl, nofile]
+  tags: [preflight, host-prep, sysctl, nofile]
 
 - name: "[0/8 Ubuntu] Persist kernel sysctl parameters (/etc/sysctl.d/99-kubernetes-sandbox.conf)"
   ansible.builtin.copy:
@@ -95,7 +95,7 @@
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl, nofile]
+  tags: [preflight, host-prep, sysctl, nofile]
 
 - name: "[0/8 Ubuntu] Apply open file descriptor limits in PAM (/etc/security/limits.d/99-kubernetes-sandbox-nofile.conf)"
   ansible.builtin.copy:
@@ -115,7 +115,7 @@
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl, nofile]
+  tags: [preflight, host-prep, sysctl, nofile]
 
 - name: "[0/8 Ubuntu] Apply systemd Manager DefaultLimitNOFILE"
   ansible.builtin.copy:
@@ -135,7 +135,7 @@
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl, nofile]
+  tags: [preflight, host-prep, sysctl, nofile]
 
 - name: "[0/8 Ubuntu] Reload kernel sysctl and re-exec systemd daemon"
   ansible.builtin.shell: |
@@ -152,7 +152,7 @@
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
-  tags: [host-prep, sysctl, nofile]
+  tags: [preflight, host-prep, sysctl, nofile]
 
 - name: "[0/8 Ubuntu] Mask systemd wait-online services when headless_vm_optimize=true"
   ansible.builtin.systemd:
@@ -168,14 +168,14 @@
   when:
     - headless_vm_optimize | bool
     - not (dry_run_mode | bool)
-  tags: [host-prep, vm-optimize]
+  tags: [preflight, host-prep, vm-optimize]
 
 # ------------------------------------------------------------------------------
 # CLI Tools Audit & Multi-Architecture Binary Provisioning
 # ------------------------------------------------------------------------------
 - name: "[0/8 Ubuntu] Audit host CLI tools (kubectl, minikube, helm, testkube, docker)"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     for tool in kubectl minikube helm testkube docker; do
       if command -v "$tool" >/dev/null 2>&1; then
         echo "PRESENT:$tool:$(command -v "$tool")"
@@ -193,7 +193,7 @@
 - name: "[0/8 Ubuntu] Install multi-arch kubectl if missing"
   ansible.builtin.shell: |
     set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     K8S_VER="{{ kubectl_version | default('latest') }}"
     if [ "$K8S_VER" = "latest" ]; then
       K8S_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo "{{ k8s_fallback_version }}")
@@ -211,7 +211,7 @@
 
 - name: "[0/8 Ubuntu] Check installed Minikube version"
   ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     minikube version --short 2>/dev/null || minikube version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+' | head -n1 || echo "v0.0"
   args:
     executable: /bin/bash
@@ -235,7 +235,7 @@
 - name: "[0/8 Ubuntu] Install Helm v3 and Testkube CLI if missing"
   ansible.builtin.shell: |
     set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     export HELM_INSTALL_DIR="/usr/local/bin"
     if ! command -v helm >/dev/null 2>&1 && [ ! -f /usr/local/bin/helm ]; then
       if command -v openssl >/dev/null 2>&1; then
@@ -264,24 +264,78 @@
   tags: [preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Install Docker CE via apt if missing"
-  ansible.builtin.apt:
-    name: [docker.io, containerd]
-    state: present
-    update_cache: yes
+  ansible.builtin.shell: |
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq docker.io containerd 2>/dev/null || apt-get install -y -qq docker.io || apt-get install -y -qq docker-ce docker-ce-cli containerd.io
+  args:
+    executable: /bin/bash
   become: "{{ ansible_facts['user_id'] != 'root' }}"
+  changed_when: true
   when:
     - "'MISSING:docker' in cli_audit_ubuntu.stdout"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
-- name: "[0/8 Ubuntu] Check if Docker daemon is already active"
-  ansible.builtin.shell: |
-    docker info >/dev/null 2>&1 && echo "ACTIVE" || echo "INACTIVE"
-  args:
-    executable: /bin/bash
-  register: docker_daemon_check_ubuntu
-  changed_when: false
+- name: "[0/8 Ubuntu] Query system group database (/etc/group) via native getent"
+  ansible.builtin.getent:
+    database: group
+    split: ":"
   check_mode: false
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Evaluate target user and docker group membership facts"
+  ansible.builtin.set_fact:
+    target_docker_user_ubuntu: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
+    docker_group_exists_ubuntu: "{{ 'docker' in (ansible_facts['getent_group'] | default({})) }}"
+    user_in_docker_group_ubuntu: >-
+      {{
+        ('docker' in (ansible_facts['getent_group'] | default({}))) and
+        (
+          (lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true))
+          in ((ansible_facts['getent_group']['docker'][2] | default('')).split(','))
+        )
+      }}
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Ensure docker group exists"
+  ansible.builtin.group:
+    name: docker
+    state: present
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - not (dry_run_mode | bool)
+    - not (docker_group_exists_ubuntu | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Add invoking user to docker group (secure group membership)"
+  ansible.builtin.user:
+    name: "{{ target_docker_user_ubuntu }}"
+    groups: docker
+    append: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - not (dry_run_mode | bool)
+    - not (user_in_docker_group_ubuntu | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Gather native systemd service facts"
+  ansible.builtin.service_facts:
+  check_mode: false
+  failed_when: false
+  when: ansible_facts['service_mgr'] == 'systemd'
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Ubuntu] Evaluate whether Docker daemon service is active"
+  ansible.builtin.set_fact:
+    docker_service_active_ubuntu: >-
+      {{
+        (
+          (ansible_facts.get('services', {}).get('docker.service', {}).get('state', '') == 'running') or
+          (ansible_facts.get('services', {}).get('docker', {}).get('state', '') == 'running')
+        )
+      }}
   tags: [always, preflight, host-prep]
 
 - name: "[0/8 Ubuntu] Enable and start Docker service"
@@ -295,57 +349,56 @@
   when:
     - ansible_facts['service_mgr'] == 'systemd'
     - not (dry_run_mode | bool)
-    - "'INACTIVE' in (docker_daemon_check_ubuntu.stdout | default('INACTIVE'))"
+    - not (docker_service_active_ubuntu | bool)
   tags: [preflight, host-prep]
 
-- name: "[0/8 Ubuntu] Check if user is already in docker group"
+- name: "[0/8 Ubuntu] Verify Docker container runtime is available and user can operate in docker group"
   ansible.builtin.shell: |
-    id -Gn "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}" 2>/dev/null | grep -qw docker && echo "IN_GROUP" || echo "NOT_IN_GROUP"
-  args:
-    executable: /bin/bash
-  register: user_docker_group_check_ubuntu
-  changed_when: false
-  check_mode: false
-  tags: [always, preflight, host-prep]
-
-- name: "[0/8 Ubuntu] Ensure docker group exists"
-  ansible.builtin.group:
-    name: docker
-    state: present
-  become: "{{ ansible_facts['user_id'] != 'root' }}"
-  when:
-    - not (dry_run_mode | bool)
-    - "'NOT_IN_GROUP' in (user_docker_group_check_ubuntu.stdout | default('NOT_IN_GROUP'))"
-  tags: [preflight, host-prep]
-
-- name: "[0/8 Ubuntu] Add invoking user to docker group (secure group membership)"
-  ansible.builtin.user:
-    name: "{{ lookup('env', 'SUDO_USER') | default(ansible_facts['user_id'], true) }}"
-    groups: docker
-    append: yes
-  become: "{{ ansible_facts['user_id'] != 'root' }}"
-  when:
-    - not (dry_run_mode | bool)
-    - "'NOT_IN_GROUP' in (user_docker_group_check_ubuntu.stdout | default('NOT_IN_GROUP'))"
-  tags: [preflight, host-prep]
-
-- name: "[0/8 Ubuntu] Verify Docker container runtime is available on host"
-  ansible.builtin.shell: |
-    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
     if ! command -v docker >/dev/null 2>&1; then
-      echo "ERROR: Docker runtime is required by Minikube (--driver=docker) but 'docker' was not found in PATH."
-      echo "Please install Docker on this host: 'sudo apt-get install -y docker.io containerd'."
+      cat >&2 <<'EOF'
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] Docker Engine Not Found After Apt Provisioning
+    --------------------------------------------------------------------------------
+    Why Ansible stopped:
+      Minikube (--driver=docker) requires the 'docker' binary in PATH, but automated
+      apt installation did not make '/usr/bin/docker' available (e.g., missing apt
+      repository or running without sudo privileges).
+
+    How to resolve:
+      1. Install Docker Engine via apt:
+         sudo apt-get update && sudo apt-get install -y docker.io containerd
+      2. Re-run cluster reconciliation:
+         make cluster
+    ================================================================================
+    EOF
       exit 1
     fi
     if docker info >/dev/null 2>&1; then
-      echo "Docker daemon is active and accessible."
-    elif command -v sg >/dev/null 2>&1 && sg docker -c "docker info" >/dev/null 2>&1; then
-      echo "Docker daemon is active and accessible via docker group."
-    elif [ "$(id -u)" -eq 0 ] || sudo -n docker info >/dev/null 2>&1; then
-      echo "Docker daemon is active and accessible via sudo."
+      echo "Docker daemon is active and accessible by current session user '$(whoami)'."
     else
-      echo "ERROR: Docker daemon is not active or accessible by user '$(whoami)'."
-      echo "Please start Docker service ('sudo systemctl start docker') and verify user belongs to the 'docker' group ('sudo usermod -aG docker $(whoami)')."
+      cat >&2 <<EOF
+    ================================================================================
+    [STAGE 0 PREFLIGHT ACTION REQUIRED] Activate 'docker' Group or Daemon Session
+    --------------------------------------------------------------------------------
+    What Ansible already configured for you:
+      ✓ Ensured 'docker' group exists in /etc/group
+      ✓ Added user '$(whoami)' to the 'docker' group (/etc/group: $(getent group docker 2>/dev/null || echo 'configured'))
+      ✓ Enabled and started 'docker.service' via systemd
+
+    Why Ansible cannot continue in this shell process:
+      Linux kernels assign supplementary group IDs (GIDs) at login time. Because
+      '$(whoami)' was added to the 'docker' group during this run (or 'docker.service'
+      is blocked in a container/non-systemd environment), your current shell process
+      still holds its old group credentials and cannot open /var/run/docker.sock.
+
+    How to resolve (run this one-liner to reload your group session and resume):
+      newgrp docker <<'EOC'
+      make cluster
+    EOC
+      (Or simply run 'newgrp docker' first, then run 'make cluster'.)
+    ================================================================================
+    EOF
       exit 1
     fi
   args:
@@ -354,4 +407,4 @@
   when:
     - not (dry_run_mode | bool)
     - not (preflight_only_mode | default(false) | bool)
-  tags: [host-prep]
+  tags: [preflight, host-prep]

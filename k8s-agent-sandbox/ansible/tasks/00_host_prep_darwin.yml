@@ -1,22 +1,18 @@
 ---
 # ==============================================================================
-# FLOW 1: macOS Apple Silicon (arm64) Host Toolchain Preparation
+# FLOW 1: macOS (Apple Silicon arm64 & Intel x86_64) Host Toolchain Preparation
 # Strictly unprivileged user space (zero become/sudo required)
 # ==============================================================================
 
-- name: "[0/8 macOS] Resolve Apple Silicon Homebrew prefix"
+- name: "[0/8 macOS] Resolve Homebrew prefix from HOMEBREW_PREFIX or CPU architecture"
   ansible.builtin.set_fact:
-    brew_prefix: "/opt/homebrew"
+    brew_prefix: "{{ ansible_facts['env']['HOMEBREW_PREFIX'] | default('/opt/homebrew' if ansible_facts['architecture'] in ['arm64', 'aarch64'] else '/usr/local', true) }}"
   tags: [always, preflight, host-prep]
 
-- name: "[0/8 macOS] Audit host CLI tools (kubectl, minikube, helm, testkube, docker)"
+- name: "[0/8 macOS] Audit host CLI tools (kubectl, minikube, helm, testkube)"
   ansible.builtin.shell: |
-    for tool in kubectl minikube helm testkube docker; do
-      if command -v "$tool" >/dev/null 2>&1; then
-        echo "PRESENT:$tool:$(command -v "$tool")"
-      else
-        echo "MISSING:$tool"
-      fi
+    for tool in kubectl minikube helm testkube; do
+      command -v "$tool" >/dev/null 2>&1 || echo "$tool"
     done
   environment:
     PATH: "{{ brew_prefix }}/bin:{{ brew_prefix }}/sbin:{{ ansible_facts['env']['PATH'] }}"
@@ -30,30 +26,61 @@
 - name: "[0/8 macOS] Install missing CLI tools via Homebrew"
   ansible.builtin.shell: |
     set -e
-    command -v kubectl >/dev/null 2>&1 || brew install kubectl
-    command -v minikube >/dev/null 2>&1 || brew install minikube
-    command -v helm >/dev/null 2>&1 || brew install helm
-    command -v testkube >/dev/null 2>&1 || brew install kubeshop/testkube/testkube || brew install testkube
+    for tool in {{ cli_audit_darwin.stdout_lines | join(' ') }}; do
+      if [ "$tool" = "testkube" ]; then
+        brew install kubeshop/testkube/testkube || brew install testkube
+      else
+        brew install "$tool"
+      fi
+    done
   environment:
     PATH: "{{ brew_prefix }}/bin:{{ brew_prefix }}/sbin:{{ ansible_facts['env']['PATH'] }}"
   args:
     executable: /bin/bash
   changed_when: true
   when:
-    - "'MISSING:kubectl' in cli_audit_darwin.stdout or 'MISSING:minikube' in cli_audit_darwin.stdout or 'MISSING:helm' in cli_audit_darwin.stdout or 'MISSING:testkube' in cli_audit_darwin.stdout"
+    - (cli_audit_darwin.stdout_lines | default([]) | length) > 0
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
 - name: "[0/8 macOS] Verify Docker container runtime is available on host"
   ansible.builtin.shell: |
     if ! command -v docker >/dev/null 2>&1; then
-      echo "ERROR: Docker is required for Minikube (--driver=docker) but was not found in PATH."
-      echo "Please install Docker Desktop (e.g. 'brew install --cask docker') or start your container engine."
+      cat >&2 <<'EOF'
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] Missing Container Runtime on macOS (docker)
+    --------------------------------------------------------------------------------
+    Why Ansible stopped:
+      Minikube (--driver=docker) requires a macOS container engine (Docker Desktop,
+      OrbStack, or Colima), which requires macOS GUI / system-extension approval
+      and was not found in PATH.
+
+    How to resolve (choose one, then re-run 'make cluster'):
+      • Option A (Docker Desktop): brew install --cask docker && open -a Docker
+      • Option B (OrbStack):       brew install --cask orbstack && open -a OrbStack
+      • Option C (Colima CLI):     brew install docker colima && colima start --cpu 4 --memory 10
+    ================================================================================
+    EOF
       exit 1
     fi
     if ! docker info >/dev/null 2>&1; then
-      echo "ERROR: Docker Desktop is installed but the daemon is not running."
-      echo "Please start Docker Desktop ('open -a Docker') before reconciling the cluster."
+      cat >&2 <<'EOF'
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] macOS Docker Daemon Is Not Running
+    --------------------------------------------------------------------------------
+    Why Ansible stopped:
+      The 'docker' CLI is installed, but the container engine daemon is not
+      accepting connections on the Docker socket.
+
+    How to resolve:
+      1. Start your container engine:
+         • Docker Desktop: open -a Docker
+         • OrbStack:       open -a OrbStack
+         • Colima:         colima start --cpu 4 --memory 10
+      2. Wait until 'docker info' succeeds, then re-run:
+         make cluster
+    ================================================================================
+    EOF
       exit 1
     fi
   environment:
@@ -64,4 +91,4 @@
   when:
     - not (dry_run_mode | bool)
     - not (preflight_only_mode | default(false) | bool)
-  tags: [host-prep]
+  tags: [preflight, host-prep]
