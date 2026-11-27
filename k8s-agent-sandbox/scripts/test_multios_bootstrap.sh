@@ -30,6 +30,7 @@ K8S_DIR="${REPO_ROOT}/k8s-agent-sandbox"
 BOOTSTRAP_SCRIPT="${K8S_DIR}/scripts/bootstrap_cluster.sh"
 
 FAILED_TESTS=0
+SKIPPED_TESTS=0
 TOTAL_TESTS=0
 
 assert_test() {
@@ -42,6 +43,13 @@ assert_test() {
         echo -e "  ${RED}✗ FAIL:${NC} ${test_name}"
         FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
+}
+
+skip_test() {
+    local test_name="$1"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+    echo -e "  ${YELLOW}↷ SKIP:${NC} ${test_name}"
 }
 
 echo -e "${BLUE}============================================================${NC}"
@@ -108,6 +116,30 @@ else
     assert_test "Makefile exists: Makefile" 1
 fi
 
+# Resolve Python interpreters early across all test sections (host Python, PyYAML-capable, and PyYAML+Jinja2)
+export K8S_DIR
+PY_BIN=""
+for candidate in /usr/bin/python3 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys" 2>/dev/null; then
+        PY_BIN="$candidate"
+        break
+    fi
+done
+
+ANSIBLE_PY=$(head -n1 "$(command -v ansible-playbook 2>/dev/null || echo /nonexistent)" 2>/dev/null | sed 's/^#!//' | awk '{print $1}' || true)
+YAML_PY=""
+RUNTIME_TEST_PY=""
+for candidate_py in "$ANSIBLE_PY" "$PY_BIN" $(which python3 python 2>/dev/null); do
+    if [ -n "$candidate_py" ] && [ -x "$candidate_py" ]; then
+        if [ -z "$YAML_PY" ] && "$candidate_py" -c "import yaml" >/dev/null 2>&1; then
+            YAML_PY="$candidate_py"
+        fi
+        if [ -z "$RUNTIME_TEST_PY" ] && "$candidate_py" -c "import yaml, jinja2" >/dev/null 2>&1; then
+            RUNTIME_TEST_PY="$candidate_py"
+        fi
+    fi
+done
+
 # Check native Ansible playbook syntax via ansible-playbook --syntax-check
 if command -v ansible-playbook >/dev/null 2>&1; then
     if ansible-playbook -i "${K8S_DIR}/ansible/inventory.ini" "${K8S_DIR}/ansible/playbooks/site.yml" --syntax-check >/dev/null 2>&1; then
@@ -115,10 +147,32 @@ if command -v ansible-playbook >/dev/null 2>&1; then
     else
         assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 1
     fi
+else
+    skip_test "Native Ansible syntax check: site.yml (ansible-playbook not installed)"
 fi
 
-# Check embedded bash scripts inside Ansible tasks (00_host_prep, 01_minikube_gvisor, 02_k8s_stack)
-if command -v ruby >/dev/null 2>&1; then
+# Check embedded bash scripts inside Ansible tasks (00_host_prep*, 01_minikube_gvisor, 02_k8s_stack)
+if [ -n "$YAML_PY" ]; then
+    EMBEDDED_SYNTAX_STATUS=$("$YAML_PY" -c '
+import yaml, glob, os, re, subprocess
+all_ok = True
+for f in sorted(glob.glob(os.path.join(os.environ["K8S_DIR"], "ansible/tasks/*.yml"))):
+    tasks = yaml.safe_load(open(f)) or []
+    for t in tasks:
+        if not isinstance(t, dict):
+            continue
+        sh = t.get("ansible.builtin.shell") or t.get("shell")
+        if not sh:
+            continue
+        sanitized = re.sub(r"\{\{.*?\}\}", "dummy", sh, flags=re.S)
+        sanitized = re.sub(r"\{%.*?%\}", "", sanitized, flags=re.S)
+        res = subprocess.run(["bash", "-n"], input=sanitized, text=True)
+        if res.returncode != 0:
+            all_ok = False
+raise SystemExit(0 if all_ok else 1)
+' 2>/dev/null && echo "0" || echo "1")
+    assert_test "Embedded Bash syntax check in all Ansible tasks/*.yml" "$EMBEDDED_SYNTAX_STATUS"
+elif command -v ruby >/dev/null 2>&1; then
     EMBEDDED_SYNTAX_STATUS=$(ruby -ryaml -e '
     all_ok = true
     Dir.glob("'"${K8S_DIR}"'/ansible/tasks/*.yml").sort.each do |f|
@@ -135,16 +189,11 @@ if command -v ruby >/dev/null 2>&1; then
     exit(all_ok ? 0 : 1)
     ' 2>/dev/null && echo "0" || echo "1")
     assert_test "Embedded Bash syntax check in all Ansible tasks/*.yml" "$EMBEDDED_SYNTAX_STATUS"
+else
+    skip_test "Embedded Bash syntax check in all Ansible tasks/*.yml (requires PyYAML or Ruby)"
 fi
 
 # Python AST syntax on ALL python files in repository
-PY_BIN=""
-for candidate in /usr/bin/python3 python3; do
-    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys" 2>/dev/null; then
-        PY_BIN="$candidate"
-        break
-    fi
-done
 
 PY_FILES=(
     "${K8S_DIR}/testkube/tests/claim_and_measure.py"
@@ -161,7 +210,7 @@ for py_file in "${PY_FILES[@]}"; do
                 assert_test "Python AST syntax: $(basename "$py_file")" 1
             fi
         else
-            assert_test "Python file present: $(basename "$py_file")" 0
+            skip_test "Python AST syntax: $(basename "$py_file") (python3 not installed)"
         fi
     fi
 done
@@ -189,7 +238,7 @@ for js in "${JS_TESTS[@]}"; do
                 assert_test "JS syntax check: $(basename "$js")" 1
             fi
         else
-            assert_test "JS test file present: $(basename "$js")" 0
+            skip_test "JS syntax check: $(basename "$js") (node not installed)"
         fi
     fi
 done
@@ -520,17 +569,6 @@ fi
 # ==============================================================================
 echo -e "\n${YELLOW}[3/6] Testing Real Ansible Sizing Expression & Single-Pass Pipeline...${NC}"
 
-# Resolve Python interpreter used by ansible-playbook (portable across macOS, Debian, Ubuntu, and Rocky Linux)
-export K8S_DIR
-RUNTIME_TEST_PY=""
-ANSIBLE_PY=$(head -n1 "$(command -v ansible-playbook 2>/dev/null || echo /nonexistent)" 2>/dev/null | sed 's/^#!//' | awk '{print $1}' || true)
-for candidate_py in "$ANSIBLE_PY" "$PY_BIN" $(which python3 python 2>/dev/null); do
-    if [ -n "$candidate_py" ] && [ -x "$candidate_py" ] && "$candidate_py" -c "import yaml, jinja2" >/dev/null 2>&1; then
-        RUNTIME_TEST_PY="$candidate_py"
-        break
-    fi
-done
-
 # Real Runtime Execution Test: Execute actual Ansible Jinja2 sizing formula with RUNTIME_TEST_PY
 if [ -n "$RUNTIME_TEST_PY" ]; then
     "$RUNTIME_TEST_PY" -c '
@@ -553,9 +591,7 @@ assert int(mem_tpl.render(minikube_custom_memory_mb="7168", minikube_ci_mode=Fal
     assert_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): Executes real Ansible sizing formula (8192 default, 6144 clamp, 4096 CI, custom override)" 0 || \
     assert_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): Executes real Ansible sizing formula (8192 default, 6144 clamp, 4096 CI, custom override)" 1
 else
-    grep -q "effective_memory_mb:" "${K8S_DIR}/ansible/tasks/01_minikube_gvisor.yml" && \
-    assert_test "tasks/01_minikube_gvisor.yml: Ansible sizing task defined" 0 || \
-    assert_test "tasks/01_minikube_gvisor.yml: Ansible sizing task defined" 1
+    skip_test "Live Jinja2 Runtime (01_minikube_gvisor.yml): requires Python yaml+jinja2"
 fi
 
 # Verify bootstrap_cluster.sh has zero dead bash functions (install_host_bin, compute_cluster_sizing, reconcile_runsc_toml, prime_sudo, start_sudo_keepalive, audit_and_tune_linux_inotify removed)
@@ -564,6 +600,101 @@ if ! grep -qE "install_host_bin|compute_cluster_sizing|reconcile_runsc_toml|prim
 else
     assert_test "bootstrap_cluster.sh: Dead bash functions still present" 1
 fi
+
+# Unit Test: ensure_ansible_collections() does NOT trust false-zero exit code from ansible-doc (Rocky 10 bug)
+(
+    COLL_MOCK="${MOCK_TMP_DIR}/coll_mock_216"
+    mkdir -p "${COLL_MOCK}/bin" "${COLL_MOCK}/collections"
+    cat << 'EOF' > "${COLL_MOCK}/bin/ansible-doc"
+#!/bin/sh
+# Simulate upstream ansible-doc exiting 0 even when collection module is missing
+exit 0
+EOF
+    cat << 'EOF' > "${COLL_MOCK}/bin/ansible"
+#!/bin/sh
+echo "ansible [core 2.16.19]"
+EOF
+    cat << EOF > "${COLL_MOCK}/bin/ansible-galaxy"
+#!/bin/sh
+STATE="${COLL_MOCK}/installed.flag"
+LOG="${COLL_MOCK}/galaxy.log"
+if [ "\$1" = "collection" ] && [ "\$2" = "list" ]; then
+    if [ -f "\$STATE" ]; then
+        echo "ansible.posix    2.0.0"
+        echo "community.general 9.5.0"
+    fi
+    exit 0
+fi
+if [ "\$1" = "collection" ] && [ "\$2" = "install" ]; then
+    echo "\$*" >> "\$LOG"
+    touch "\$STATE"
+    exit 0
+fi
+EOF
+    chmod +x "${COLL_MOCK}/bin/"*
+    export PATH="${COLL_MOCK}/bin:${PATH}"
+    export ANSIBLE_COLLECTIONS_PATH="${COLL_MOCK}/collections"
+    ! has_required_collections && \
+    ensure_ansible_collections >/dev/null && \
+    has_required_collections && \
+    grep -q "ansible.posix:>=2.0.0" "${COLL_MOCK}/galaxy.log"
+) && assert_test "ensure_ansible_collections(): Installs missing collections on ansible-core 2.16.19 even when ansible-doc returns exit 0" 0 || \
+    assert_test "ensure_ansible_collections(): Failed to detect/install missing collections on ansible-core 2.16.19" 1
+
+# Unit Test: ensure_ansible_collections() selects legacy pins for ansible-core < 2.16 and fast-paths when already present
+(
+    COLL_MOCK2="${MOCK_TMP_DIR}/coll_mock_214"
+    mkdir -p "${COLL_MOCK2}/bin" "${COLL_MOCK2}/collections"
+    cat << 'EOF' > "${COLL_MOCK2}/bin/ansible"
+#!/bin/sh
+echo "ansible [core 2.14.17]"
+EOF
+    cat << EOF > "${COLL_MOCK2}/bin/ansible-galaxy"
+#!/bin/sh
+STATE="${COLL_MOCK2}/installed.flag"
+LOG="${COLL_MOCK2}/galaxy.log"
+if [ "\$1" = "collection" ] && [ "\$2" = "list" ]; then
+    if [ -f "\$STATE" ]; then
+        echo "ansible.posix    1.5.4"
+        echo "community.general 8.6.0"
+    fi
+    exit 0
+fi
+if [ "\$1" = "collection" ] && [ "\$2" = "install" ]; then
+    echo "\$*" >> "\$LOG"
+    touch "\$STATE"
+    exit 0
+fi
+EOF
+    chmod +x "${COLL_MOCK2}/bin/"*
+    export PATH="${COLL_MOCK2}/bin:${PATH}"
+    export ANSIBLE_COLLECTIONS_PATH="${COLL_MOCK2}/collections"
+    ensure_ansible_collections >/dev/null && \
+    grep -q "ansible.posix:>=1.5.4,<2.0.0" "${COLL_MOCK2}/galaxy.log" && \
+    rm -f "${COLL_MOCK2}/galaxy.log" && \
+    ensure_ansible_collections >/dev/null && \
+    [ ! -f "${COLL_MOCK2}/galaxy.log" ]
+) && assert_test "ensure_ansible_collections(): Pins <2.16 collections accurately and fast-paths idempotently when already installed" 0 || \
+    assert_test "ensure_ansible_collections(): Failed legacy pin or idempotent fast-path test" 1
+
+# Unit Test: ensure_ansible_collections() returns non-zero cleanly if collection install still leaves collections missing
+(
+    COLL_MOCK3="${MOCK_TMP_DIR}/coll_mock_fail"
+    mkdir -p "${COLL_MOCK3}/bin" "${COLL_MOCK3}/collections"
+    cat << 'EOF' > "${COLL_MOCK3}/bin/ansible"
+#!/bin/sh
+echo "ansible [core 2.16.19]"
+EOF
+    cat << 'EOF' > "${COLL_MOCK3}/bin/ansible-galaxy"
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${COLL_MOCK3}/bin/"*
+    export PATH="${COLL_MOCK3}/bin:${PATH}"
+    export ANSIBLE_COLLECTIONS_PATH="${COLL_MOCK3}/collections"
+    ! ensure_ansible_collections >/dev/null 2>&1
+) && assert_test "ensure_ansible_collections(): Fails fast non-zero if collections remain absent after install" 0 || \
+    assert_test "ensure_ansible_collections(): Did not fail fast when collections remained missing" 1
 
 # Verify bootstrap_cluster.sh runs a single-pass ansible-playbook pipeline and passes preflight_only_mode=\${PREFLIGHT_ONLY}
 if grep -q 'preflight_only_mode=\${PREFLIGHT_ONLY}' "${BOOTSTRAP_SCRIPT}" && \
@@ -646,8 +777,8 @@ EOF
     assert_test "tasks/01_minikube_gvisor.yml: Live containerd 2.x (v3) drop-in reconciliation failed" 1
 
 # Verify zero unreachable/dead tasks across all 00_host_prep*.yml files (every task must carry 'preflight' tag)
-if [ -n "$RUNTIME_TEST_PY" ]; then
-    if "$RUNTIME_TEST_PY" -c '
+if [ -n "$YAML_PY" ]; then
+    if "$YAML_PY" -c '
 import yaml, glob, os
 k8s_dir = os.environ["K8S_DIR"]
 for f in sorted(glob.glob(os.path.join(k8s_dir, "ansible/tasks/00_host_prep*.yml"))):
@@ -673,6 +804,8 @@ elif command -v ruby >/dev/null 2>&1; then
     else
         assert_test "tasks/00_host_prep*.yml: Zero dead/unreachable Stage 0 tasks (all tasks carry 'preflight' tag)" 1
     fi
+else
+    skip_test "tasks/00_host_prep*.yml: Stage 0 preflight tag check (requires PyYAML or Ruby)"
 fi
 
 # Verify Stage 0 and Stage 1 explicitly enforce that current user can operate in docker group (no sudo -n docker info bypass)
@@ -685,8 +818,8 @@ else
 fi
 
 # Real Runtime Execution Test: Extract broker.py from egress-broker.yaml and run in-process WSGI/handler test with threat_probe.py (Blocked 403 vs Drift EXTRA_ALLOWED_HOSTS 200)
-if [ -n "$RUNTIME_TEST_PY" ]; then
-    "$RUNTIME_TEST_PY" -c '
+if [ -n "$YAML_PY" ]; then
+    "$YAML_PY" -c '
 import yaml, threading, urllib.request, socket, sys, os
 socket.getfqdn = lambda *a: "localhost"
 k8s_dir = os.environ["K8S_DIR"]
@@ -724,11 +857,13 @@ assert d_t6b == "FAIL (EXPOSED)", f"Expected FAIL (EXPOSED) on drift, got {d_t6b
 ' >/dev/null 2>&1 && \
     assert_test "Live E2E Runtime (egress-broker + threat_probe.py): Verifies HTTP 403 block (PASS) and EXTRA_ALLOWED_HOSTS drift detection (FAIL EXPOSED)" 0 || \
     assert_test "Live E2E Runtime (egress-broker + threat_probe.py): Verifies HTTP 403 block (PASS) and EXTRA_ALLOWED_HOSTS drift detection (FAIL EXPOSED)" 1
+else
+    skip_test "Live E2E Runtime (egress-broker + threat_probe.py): requires PyYAML"
 fi
 
 # Real Runtime Execution Test: Extract exporter.py from sandbox-latency-exporter.yaml and verify POST /record & GET /metrics for T6B drift (1 -> 0 -> 1)
-if [ -n "$RUNTIME_TEST_PY" ]; then
-    "$RUNTIME_TEST_PY" -c '
+if [ -n "$YAML_PY" ]; then
+    "$YAML_PY" -c '
 import yaml, threading, urllib.request, socket, sys, os
 socket.getfqdn = lambda *a: "localhost"
 k8s_dir = os.environ["K8S_DIR"]
@@ -757,6 +892,8 @@ finally:
 ' >/dev/null 2>&1 && \
     assert_test "Live E2E Runtime (sandbox-latency-exporter): Verifies POST /record & GET /metrics for T6B=0 drift, cold latency, and active_sandboxes=3" 0 || \
     assert_test "Live E2E Runtime (sandbox-latency-exporter): Verifies POST /record & GET /metrics for T6B=0 drift, cold latency, and active_sandboxes=3" 1
+else
+    skip_test "Live E2E Runtime (sandbox-latency-exporter): requires PyYAML"
 fi
 
 # Real POSIX /bin/sh Execution Test: Execute rendered TestWorkflow shell steps under /bin/sh -e (catches sh: 0: bad number)
@@ -795,6 +932,8 @@ assert "default-pod-1,default-pod-1" in open(os.path.join(data_dir, "sandbox_ids
 ' >/dev/null 2>&1 && \
     assert_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): Executes under /bin/sh -e with zero 'bad number' errors" 0 || \
     assert_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): Executes under /bin/sh -e with zero 'bad number' errors" 1
+else
+    skip_test "Live POSIX /bin/sh Runtime (test-workflow.yaml.j2 Freshness Gate): requires Python yaml+jinja2"
 fi
 
 # Regression Test: Host-side gVisor archive extraction (tar -xjf / Python tarfile)
@@ -1296,7 +1435,7 @@ REQUIRED_MANIFESTS=(
 YAML_PARSER=""
 if command -v ruby >/dev/null 2>&1 && ruby -e 'require "yaml"' 2>/dev/null; then
     YAML_PARSER="ruby"
-elif [ -n "$PY_BIN" ] && "$PY_BIN" -c "import yaml" 2>/dev/null; then
+elif [ -n "$YAML_PY" ]; then
     YAML_PARSER="python"
 fi
 
@@ -1310,18 +1449,13 @@ for manifest in "${REQUIRED_MANIFESTS[@]}"; do
                 assert_test "YAML parser syntax (Ruby): ${rel_path}" 1
             fi
         elif [ "$YAML_PARSER" == "python" ]; then
-            if "$PY_BIN" -c "import yaml; list(yaml.safe_load_all(open('$manifest')))" 2>/dev/null; then
+            if "$YAML_PY" -c "import yaml; list(yaml.safe_load_all(open('$manifest')))" 2>/dev/null; then
                 assert_test "YAML parser syntax (PyYAML): ${rel_path}" 0
             else
                 assert_test "YAML parser syntax (PyYAML): ${rel_path}" 1
             fi
         else
-            # Fallback structural check if neither parser library is present
-            if grep -q ":" "$manifest" 2>/dev/null; then
-                assert_test "YAML structural check (fallback): ${rel_path}" 0
-            else
-                assert_test "YAML structural check (fallback): ${rel_path}" 1
-            fi
+            skip_test "YAML parser syntax: ${rel_path} (PyYAML/Ruby not installed)"
         fi
     else
         assert_test "Manifest exists: ${rel_path}" 1
@@ -1378,6 +1512,10 @@ assert len(docs) > 0 and docs[0].get('kind') == 'TestWorkflow', 'Rendered manife
         else
             assert_test "Testkube template render (Jinja2): ${tmpl} (render or YAML validation failure)" 1
         fi
+    done
+else
+    for tmpl in "test-workflow.yaml.j2" "test-workflow-security.yaml.j2" "test-workflow-sustained-load.yaml.j2"; do
+        skip_test "Testkube template render (Jinja2): ${tmpl} (requires Python yaml+jinja2)"
     done
 fi
 
@@ -1542,8 +1680,8 @@ else
 fi
 
 # Verify Ansible playbooks & tasks against ansible-playbook-creator structural & security rules
-if [ -n "$RUNTIME_TEST_PY" ]; then
-    if "$RUNTIME_TEST_PY" -c '
+if [ -n "$YAML_PY" ]; then
+    if "$YAML_PY" -c '
 import yaml, glob, os
 k8s_dir = os.environ["K8S_DIR"]
 plays = yaml.safe_load(open(os.path.join(k8s_dir, "ansible/playbooks/site.yml")))
@@ -1599,13 +1737,20 @@ elif command -v ruby >/dev/null 2>&1; then
     else
         assert_test "ansible/: Failed ansible-playbook-creator structural/security scan" 1
     fi
+else
+    skip_test "ansible/: ansible-playbook-creator structural/security scan (requires PyYAML or Ruby)"
 fi
 
 # ==============================================================================
 # Summary Report
 # ==============================================================================
+PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS - SKIPPED_TESTS))
 echo -e "\n${BLUE}============================================================${NC}"
-echo -e "${BLUE}Test Suite Results: $((TOTAL_TESTS - FAILED_TESTS))/${TOTAL_TESTS} Passed${NC}"
+if [ "$SKIPPED_TESTS" -gt 0 ]; then
+    echo -e "${BLUE}Test Suite Results: ${PASSED_TESTS}/${TOTAL_TESTS} Passed (${SKIPPED_TESTS} skipped, ${FAILED_TESTS} failed)${NC}"
+else
+    echo -e "${BLUE}Test Suite Results: ${PASSED_TESTS}/${TOTAL_TESTS} Passed${NC}"
+fi
 echo -e "${BLUE}============================================================${NC}"
 
 if [ "$FAILED_TESTS" -eq 0 ]; then
