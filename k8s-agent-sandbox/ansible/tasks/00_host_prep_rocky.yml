@@ -20,34 +20,35 @@
   check_mode: false
   tags: [always, preflight, host-prep]
 
-- name: "[0/8 Rocky] Install base utilities via dnf/yum"
-  ansible.builtin.shell: |
-    set -e
-    PACKAGES=""
-    command -v tar >/dev/null 2>&1 || PACKAGES="$PACKAGES tar"
-    command -v jq >/dev/null 2>&1 || PACKAGES="$PACKAGES jq"
-    command -v bzip2 >/dev/null 2>&1 || PACKAGES="$PACKAGES bzip2"
-    command -v ps >/dev/null 2>&1 || PACKAGES="$PACKAGES procps-ng"
-    command -v openssl >/dev/null 2>&1 || PACKAGES="$PACKAGES openssl"
-    if ! command -v curl >/dev/null 2>&1; then
-      if command -v dnf >/dev/null 2>&1 && dnf info curl-minimal >/dev/null 2>&1; then
-        PACKAGES="$PACKAGES curl-minimal"
-      else
-        PACKAGES="$PACKAGES curl"
-      fi
-    fi
-    if [ -n "$PACKAGES" ]; then
-      if command -v dnf >/dev/null 2>&1; then
-        dnf install -y --allowerasing $PACKAGES ca-certificates || dnf install -y $PACKAGES ca-certificates
-      elif command -v yum >/dev/null 2>&1; then
-        yum install -y $PACKAGES ca-certificates
-      fi
-    fi
-  args:
-    executable: /bin/bash
+- name: "[0/8 Rocky] Install base utilities via dnf"
+  ansible.builtin.dnf:
+    name:
+      - tar
+      - jq
+      - bzip2
+      - procps-ng
+      - openssl
+      - ca-certificates
+      - iproute-tc
+      - conntrack-tools
+      - socat
+    state: present
+    allowerasing: true
+    install_weak_deps: "{{ false if (ansible_facts['distribution_major_version'] | default('9') | int >= 10) else true }}"
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - "'MISSING:' in base_utils_check.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Install curl-minimal via dnf if curl missing"
+  ansible.builtin.dnf:
+    name: curl-minimal
+    state: present
+    allowerasing: true
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - "'MISSING:curl' in base_utils_check.stdout"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep]
 
@@ -152,23 +153,32 @@
   ignore_errors: true
   ignore_unreachable: true
   failed_when: false
+  notify: Re-exec systemd manager
   when:
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
     - not (dry_run_mode | bool)
   tags: [preflight, host-prep, sysctl, nofile]
 
-- name: "[0/8 Rocky] Reload kernel sysctl and re-exec systemd daemon"
-  ansible.builtin.shell: |
-    sysctl -p /etc/sysctl.d/99-kubernetes-sandbox.conf >/dev/null 2>&1 || true
-    systemctl daemon-reexec >/dev/null 2>&1 || true
-  args:
-    executable: /bin/bash
+- name: "[0/8 Rocky] Reload kernel sysctl via ansible.posix.sysctl drop-in"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-sandbox.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop:
+    - { key: "fs.file-max", value: "{{ nofile_controls.linux.fs_file_max }}" }
+    - { key: "fs.nr_open", value: "{{ nofile_controls.linux.fs_nr_open }}" }
+    - { key: "fs.inotify.max_user_watches", value: "{{ k8s_sysctl_params['fs.inotify.max_user_watches'] }}" }
+    - { key: "fs.inotify.max_user_instances", value: "{{ k8s_sysctl_params['fs.inotify.max_user_instances'] }}" }
+    - { key: "vm.max_map_count", value: "{{ k8s_sysctl_params['vm.max_map_count'] }}" }
+    - { key: "net.ipv4.ip_forward", value: "{{ k8s_sysctl_params['net.ipv4.ip_forward'] }}" }
   become: "{{ ansible_facts['user_id'] != 'root' }}"
   ignore_errors: true
   ignore_unreachable: true
   failed_when: false
-  changed_when: true
   when:
     - configure_linux_sysctl | bool
     - "'NEEDS_ADJUSTMENT=true' in (linux_nofile_audit.stdout | default(''))"
@@ -326,27 +336,31 @@
 # ------------------------------------------------------------------------------
 # Secure Docker CE Installation & Service Activation
 # ------------------------------------------------------------------------------
-- name: "[0/8 Rocky] Install Docker CE repository and packages via dnf/yum if missing"
-  ansible.builtin.shell: |
-    set -e
-    export PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH"
-    if ! command -v docker >/dev/null 2>&1; then
-      if [ ! -f /etc/yum.repos.d/docker-ce.repo ]; then
-        curl -fsSL https://download.docker.com/linux/centos/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo 2>/dev/null || \
-          curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
-      fi
-      if command -v dnf >/dev/null 2>&1; then
-        dnf install -y --allowerasing docker-ce docker-ce-cli containerd.io || \
-          curl -fsSL https://get.docker.com | sh
-      elif command -v yum >/dev/null 2>&1; then
-        yum install -y docker-ce docker-ce-cli containerd.io || \
-          curl -fsSL https://get.docker.com | sh
-      fi
-    fi
-  args:
-    executable: /bin/bash
+- name: "[0/8 Rocky] Install Docker CE repository (docker-ce.repo) via yum_repository"
+  ansible.builtin.yum_repository:
+    name: docker-ce-stable
+    description: "Docker CE Stable - $basearch"
+    file: docker-ce
+    baseurl: "https://download.docker.com/linux/centos/$releasever/$basearch/stable"
+    gpgcheck: true
+    gpgkey: "https://download.docker.com/linux/centos/gpg"
+    enabled: true
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  changed_when: true
+  when:
+    - "'MISSING:docker' in cli_audit_rocky.stdout"
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky] Install Docker CE packages via dnf if missing"
+  ansible.builtin.dnf:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    state: present
+    allowerasing: true
+    install_weak_deps: "{{ false if (ansible_facts['distribution_major_version'] | default('9') | int >= 10) else true }}"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
   when:
     - "'MISSING:docker' in cli_audit_rocky.stdout"
     - not (dry_run_mode | bool)
@@ -394,6 +408,104 @@
     - not (user_in_docker_group_rocky | bool)
   tags: [preflight, host-prep]
 
+- name: "[0/8 Rocky EL10+] Ensure /etc/docker directory exists"
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: "0755"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  when:
+    - (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky EL10+] Check if /etc/docker/daemon.json exists"
+  ansible.builtin.stat:
+    path: /etc/docker/daemon.json
+  register: docker_daemon_json_stat_rocky
+  check_mode: false
+  when: (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Rocky EL10+] Read existing /etc/docker/daemon.json to preserve user keys"
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: docker_daemon_json_raw_rocky
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  check_mode: false
+  when:
+    - (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+    - not (dry_run_mode | bool)
+    - docker_daemon_json_stat_rocky.stat.exists | default(false)
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Rocky EL10+] Parse existing /etc/docker/daemon.json content"
+  ansible.builtin.set_fact:
+    docker_daemon_cfg_existing_rocky: >-
+      {{
+        ((docker_daemon_json_raw_rocky.content | default('') | b64decode | trim) | from_json)
+        if ((docker_daemon_json_stat_rocky.stat.exists | default(false)) and ((docker_daemon_json_raw_rocky.content | default('') | b64decode | trim | length) > 0))
+        else {}
+      }}
+  when: (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+  tags: [always, preflight, host-prep]
+
+- name: "[0/8 Rocky EL10+] Configure Docker native nftables firewall backend (/etc/docker/daemon.json)"
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: "{{ (docker_daemon_cfg_existing_rocky | combine({'firewall-backend': 'nftables'})) | to_nice_json }}\n"
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  notify: Restart Docker daemon
+  when:
+    - (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+    - not (dry_run_mode | bool)
+    - (docker_daemon_cfg_existing_rocky.get('firewall-backend', '') != 'nftables')
+  tags: [preflight, host-prep]
+
+- name: "[0/8 Rocky EL10+] Ensure IPv4 forwarding is enabled for Docker nftables backend"
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-docker-nftables.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
+  when:
+    - (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+    - not (dry_run_mode | bool)
+  tags: [preflight, host-prep, sysctl]
+
+- name: "[0/8 Rocky EL10+] Check if IPv6 forwarding sysctl is available on host"
+  ansible.builtin.stat:
+    path: /proc/sys/net/ipv6/conf/all/forwarding
+  register: ipv6_forwarding_stat_rocky
+  check_mode: false
+  when: (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+  tags: [always, preflight, host-prep, sysctl]
+
+- name: "[0/8 Rocky EL10+] Ensure IPv6 forwarding is enabled when IPv6 stack is active"
+  ansible.posix.sysctl:
+    name: net.ipv6.conf.all.forwarding
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-docker-nftables.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  become: "{{ ansible_facts['user_id'] != 'root' }}"
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
+  when:
+    - (ansible_facts['distribution_major_version'] | default('9') | int) >= 10
+    - not (dry_run_mode | bool)
+    - ipv6_forwarding_stat_rocky.stat.exists | default(false)
+  tags: [preflight, host-prep, sysctl]
+
+- name: "[Sync Gate 0B] Flush Docker daemon restart handler before service status audit"
+  ansible.builtin.meta: flush_handlers
+  tags: [always, preflight, host-prep]
+
 - name: "[0/8 Rocky] Gather native systemd service facts"
   ansible.builtin.service_facts:
   check_mode: false
@@ -418,8 +530,7 @@
     enabled: true
     state: started
   become: "{{ ansible_facts['user_id'] != 'root' }}"
-  ignore_errors: true
-  failed_when: false
+  ignore_errors: "{{ preflight_only_mode | default(false) | bool }}"
   when:
     - ansible_facts['service_mgr'] == 'systemd'
     - not (dry_run_mode | bool)
@@ -450,23 +561,33 @@
     EOF
       exit 1
     fi
-    if docker info >/dev/null 2>&1; then
+    if DOCKER_INFO_ERR="$(docker info 2>&1)"; then
       echo "Docker daemon is active and accessible by current session user '$(whoami)'."
     else
-      cat >&2 <<EOF
+      CUR_USER="$(whoami)"
+      ACTIVE_GROUPS="$(id -nG 2>/dev/null || true)"
+      ETC_DOCKER_GROUP="$(getent group docker 2>/dev/null || echo 'missing')"
+      SOCK_INFO="$(ls -la /var/run/docker.sock 2>&1 || true)"
+      SVC_STATE="$(systemctl is-active docker 2>/dev/null || echo 'unknown')"
+      if { [ "$SVC_STATE" = "active" ] || [ "$SVC_STATE" = "unknown" ]; } && \
+         grep -qE "(^|:|,)${CUR_USER}(,|$)" <<< "$ETC_DOCKER_GROUP" && \
+         ! grep -qw "docker" <<< "$ACTIVE_GROUPS"; then
+        cat >&2 <<EOF
     ================================================================================
-    [STAGE 0 PREFLIGHT ACTION REQUIRED] Activate 'docker' Group or Daemon Session
+    [STAGE 0 PREFLIGHT ACTION REQUIRED] Activate 'docker' Group Session
     --------------------------------------------------------------------------------
-    What Ansible already configured for you:
-      ✓ Ensured 'docker' group exists in /etc/group
-      ✓ Added user '$(whoami)' to the 'docker' group (/etc/group: $(getent group docker 2>/dev/null || echo 'configured'))
-      ✓ Enabled and started 'docker.service' via systemd
+    What Ansible verified:
+      ✓ 'docker.service' is active (state=${SVC_STATE})
+      ✓ User '${CUR_USER}' is configured in /etc/group (${ETC_DOCKER_GROUP})
+      ✗ Current shell session lacks active 'docker' group (id -nG: ${ACTIVE_GROUPS})
+
+    Raw 'docker info' output:
+    ${DOCKER_INFO_ERR}
 
     Why Ansible cannot continue in this shell process:
       Linux kernels assign supplementary group IDs (GIDs) at login time. Because
-      '$(whoami)' was added to the 'docker' group during this run (or 'docker.service'
-      is blocked in a container/non-systemd environment), your current shell process
-      still holds its old group credentials and cannot open /var/run/docker.sock.
+      '${CUR_USER}' was added to the 'docker' group after this login session started,
+      your current shell cannot open /var/run/docker.sock until you refresh groups.
 
     How to resolve (run this one-liner to reload your group session and resume):
       newgrp docker <<'EOC'
@@ -475,6 +596,31 @@
       (Or simply run 'newgrp docker' first, then run 'make cluster'.)
     ================================================================================
     EOF
+      else
+        cat >&2 <<EOF
+    ================================================================================
+    [STAGE 0 PREFLIGHT BLOCKED] Docker Daemon / Socket Unavailable
+    --------------------------------------------------------------------------------
+    Live host diagnostics:
+      • docker.service state : ${SVC_STATE}
+      • /var/run/docker.sock : ${SOCK_INFO}
+      • Current user / id -nG: ${CUR_USER} (${ACTIVE_GROUPS})
+      • /etc/group docker    : ${ETC_DOCKER_GROUP}
+
+    Raw 'docker info' error:
+    ${DOCKER_INFO_ERR}
+
+    How to resolve:
+      1. Inspect & start the Docker daemon:
+         sudo systemctl enable --now docker
+         sudo systemctl status docker --no-pager
+      2. If DOCKER_HOST is overridden or socket permissions differ, unset DOCKER_HOST
+         or check 'ls -la /var/run/docker.sock'.
+      3. Re-run cluster reconciliation:
+         make cluster
+    ================================================================================
+    EOF
+      fi
       exit 1
     fi
   args:

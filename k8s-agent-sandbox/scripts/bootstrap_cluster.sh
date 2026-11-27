@@ -107,6 +107,42 @@ ensure_ansible() {
     else echo -e "${RED}✗ Please install ansible-core (ansible-playbook).${NC}" >&2; exit 1; fi
 }
 
+has_required_collections() {
+    command -v ansible-galaxy >/dev/null 2>&1 || return 1
+    local coll_list
+    coll_list="$(ansible-galaxy collection list 2>/dev/null || true)"
+    grep -qE '^ansible\.posix[[:space:]]' <<< "$coll_list" && \
+        grep -qE '^community\.general[[:space:]]' <<< "$coll_list"
+}
+
+ensure_ansible_collections() {
+    command -v ansible-galaxy >/dev/null 2>&1 || return 0
+    if has_required_collections; then
+        return 0
+    fi
+    echo -e "  ${CYAN}[>]${NC} Installing required Ansible collections (ansible.posix, community.general)..."
+    local colls_path="${ANSIBLE_COLLECTIONS_PATH:-}"
+    local target_dir="${colls_path%%:*}"
+    if [ -z "$target_dir" ]; then
+        target_dir="${HOME}/.ansible/collections"
+    fi
+    mkdir -p "$target_dir"
+    local ans_ver ans_maj ans_min
+    ans_ver="$(ansible --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || echo "2.16")"
+    IFS='.' read -r ans_maj ans_min <<< "$ans_ver"
+    if [ "${ans_maj:-2}" -lt 2 ] || { [ "${ans_maj:-2}" -eq 2 ] && [ "${ans_min:-16}" -lt 16 ]; }; then
+        ansible-galaxy collection install -p "$target_dir" "ansible.posix:>=1.5.4,<2.0.0" "community.general:>=7.0.0,<10.0.0"
+    elif [ "${ans_maj:-2}" -eq 2 ] && [ "${ans_min:-16}" -lt 19 ]; then
+        ansible-galaxy collection install -p "$target_dir" "ansible.posix:>=2.0.0" "community.general:>=7.0.0,<12.0.0"
+    else
+        ansible-galaxy collection install -p "$target_dir" -r "${ANSIBLE_DIR}/requirements.yml"
+    fi
+    if ! has_required_collections; then
+        echo -e "  ${RED}[✗]${NC} Required Ansible collections (ansible.posix, community.general) are still missing after installation." >&2
+        return 1
+    fi
+}
+
 host_needs_privilege() {
     [ "${CONFIGURE_HOST_SYSCTL:-false}" = true ] && return 0
     if [ "${HOST_PLATFORM:-}" == "Linux" ]; then
@@ -167,11 +203,15 @@ main() {
     echo -e "Host: ${GREEN}${HOST_PLATFORM}${NC} | Arch: ${GREEN}${RAW_ARCH} (${ARCH_CLI})${NC} | Toolchain: ${GREEN}${PKG_MGR}${NC} | Sizing: ${GREEN}${target_cpus} CPUs / ${target_mem} MB${NC}"
 
     if [ "$DRY_RUN" = true ]; then
-        if command -v ansible-playbook >/dev/null 2>&1; then
+        if command -v ansible-playbook >/dev/null 2>&1 && has_required_collections; then
             ansible-playbook -i "${ANSIBLE_DIR}/inventory.ini" "${ANSIBLE_DIR}/playbooks/site.yml" \
                 --check --diff --tags preflight -e "dry_run_mode=true" -e "minikube_ci_mode=${CI_MODE}" -e "minikube_custom_memory_mb=${CUSTOM_MEM}"
         else
-            echo -e "  ${YELLOW}[i]${NC} ansible-playbook not present; auditing host CLI tools directly:"
+            if command -v ansible-playbook >/dev/null 2>&1; then
+                echo -e "  ${YELLOW}[i]${NC} Required Ansible collections not installed yet; falling back to read-only CLI audit (run 'make preflight' to auto-install collections):"
+            else
+                echo -e "  ${YELLOW}[i]${NC} ansible-playbook not present; auditing host CLI tools directly:"
+            fi
             for tool in kubectl minikube helm testkube docker; do
                 if command -v "$tool" >/dev/null 2>&1; then echo -e "    ${GREEN}✓${NC} $tool: $(command -v "$tool")"
                 else echo -e "    ${YELLOW}✗${NC} $tool: MISSING"; fi
@@ -182,6 +222,7 @@ main() {
     fi
 
     ensure_ansible
+    ensure_ansible_collections
     detect_sudo_mode
     build_ansible_args
 
