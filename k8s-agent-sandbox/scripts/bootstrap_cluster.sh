@@ -121,7 +121,8 @@ ensure_ansible_collections() {
         return 0
     fi
     echo -e "  ${CYAN}[>]${NC} Installing required Ansible collections (ansible.posix, community.general)..."
-    local target_dir="${ANSIBLE_COLLECTIONS_PATH%%:*}"
+    local colls_path="${ANSIBLE_COLLECTIONS_PATH:-}"
+    local target_dir="${colls_path%%:*}"
     if [ -z "$target_dir" ]; then
         target_dir="${HOME}/.ansible/collections"
     fi

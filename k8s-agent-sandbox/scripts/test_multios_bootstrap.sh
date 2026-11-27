@@ -142,10 +142,16 @@ done
 
 # Check native Ansible playbook syntax via ansible-playbook --syntax-check
 if command -v ansible-playbook >/dev/null 2>&1; then
-    if ansible-playbook -i "${K8S_DIR}/ansible/inventory.ini" "${K8S_DIR}/ansible/playbooks/site.yml" --syntax-check >/dev/null 2>&1; then
-        assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 0
+    if ! has_required_collections; then
+        skip_test "Native Ansible syntax check: site.yml (ansible.posix/community.general not installed yet; run 'make preflight')"
     else
-        assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 1
+        SYNTAX_ERR=""
+        if SYNTAX_ERR=$(ansible-playbook -i "${K8S_DIR}/ansible/inventory.ini" "${K8S_DIR}/ansible/playbooks/site.yml" --syntax-check 2>&1); then
+            assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 0
+        else
+            assert_test "Native Ansible syntax check: site.yml (ansible-playbook --syntax-check)" 1
+            echo "$SYNTAX_ERR" | sed 's/^/      /'
+        fi
     fi
 else
     skip_test "Native Ansible syntax check: site.yml (ansible-playbook not installed)"
@@ -633,11 +639,15 @@ fi
 EOF
     chmod +x "${COLL_MOCK}/bin/"*
     export PATH="${COLL_MOCK}/bin:${PATH}"
-    export ANSIBLE_COLLECTIONS_PATH="${COLL_MOCK}/collections"
+    export HOME="${COLL_MOCK}/home"
+    mkdir -p "$HOME"
+    unset ANSIBLE_COLLECTIONS_PATH
+    set -u
     ! has_required_collections && \
     ensure_ansible_collections >/dev/null && \
     has_required_collections && \
-    grep -q "ansible.posix:>=2.0.0" "${COLL_MOCK}/galaxy.log"
+    grep -q "ansible.posix:>=2.0.0" "${COLL_MOCK}/galaxy.log" && \
+    grep -q "${HOME}/.ansible/collections" "${COLL_MOCK}/galaxy.log"
 ) && assert_test "ensure_ansible_collections(): Installs missing collections on ansible-core 2.16.19 even when ansible-doc returns exit 0" 0 || \
     assert_test "ensure_ansible_collections(): Failed to detect/install missing collections on ansible-core 2.16.19" 1
 
